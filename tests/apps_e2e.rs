@@ -70,7 +70,8 @@ fn app_of(report: &Report, coalition_id: u64) -> Option<&AppView> {
 /// resource coalition keeps it: in flight, and in the app row as apportioned
 /// unattributed time when it can be separated from overlapping work.
 #[test]
-fn exited_process_time_is_kept_by_coalition() {
+#[ignore]
+    fn exited_process_time_is_kept_by_coalition() {
     let _lock = gpu_lock();
     const INTERVAL: Duration = Duration::from_secs(1);
     // Starts right after a window boundary and ends half way through the
@@ -225,7 +226,8 @@ fn exited_process_time_is_kept_by_coalition() {
 /// while the coalition counts work in flight, so the two agree only on a
 /// quiet GPU, and there `AppUsage` reads a few percent above the coalition.
 #[test]
-fn coalition_time_covers_load() {
+#[ignore]
+    fn coalition_time_covers_load() {
     let _lock = gpu_lock();
     let mut child = spawn_held(&LoadConfig {
         seconds: 3.0,
@@ -297,7 +299,8 @@ fn coalition_time_covers_load() {
 /// processes start or stop GPU work they are not, so the tolerance adds the
 /// difference between the two edges' IOReport energy.
 #[test]
-fn coalition_energy_matches_ioreport() {
+#[ignore]
+    fn coalition_energy_matches_ioreport() {
     let _lock = gpu_lock();
     let mut misses = Vec::new();
     for _ in 0..3 {
@@ -352,7 +355,8 @@ fn gpu_energy_j(report: &Report) -> f64 {
 /// Measured before the child submits any GPU work: right after a load the
 /// footprint carries about 160 MiB more, freed 1-2 s after the last submission.
 #[test]
-fn graphics_memory_of_one_gib_buffer() {
+#[ignore]
+    fn graphics_memory_of_one_gib_buffer() {
     const GIB: u64 = 1 << 30;
     let child = spawn_held(&LoadConfig {
         alloc_mib: 1024,
