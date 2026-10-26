@@ -5,6 +5,17 @@
 description = "Build the release binary"
 run = "cargo build --release"
 
+[tasks.install]
+description = "Build the release binary if needed and install it to ~/.local/bin"
+run = """
+if [ ! -x target/release/macgpu ]; then
+  cargo build --release
+fi
+install -d "$HOME/.local/bin"
+install -m 755 target/release/macgpu "$HOME/.local/bin/macgpu"
+echo "installed $HOME/.local/bin/macgpu"
+"""
+
 [tasks.build-debug]
 description = "Build the debug binary"
 run = "cargo build"

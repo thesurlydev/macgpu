@@ -3,6 +3,10 @@ name = "macgpu"
 version = "0.1.0"
 edition = "2024"
 description = "Per-process and per-app GPU usage, power, and memory for Apple Silicon Macs"
+license = "MIT"
+repository = "https://github.com/thesurlydev/macgpu"
+categories = ["cli", "system", "monitoring"]
+keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
 readme = "README.md"
 rust-version = "1.85"
 

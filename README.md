@@ -2,6 +2,27 @@
 
 See how the Apple Silicon GPU is being used, and by which processes and apps.
 
+## Why macgpu?
+
+MacOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the depth required for performance tuning and power analysis. `macgpu` fills this gap by providing:
+
+- **Detailed Power & Thermals**: Track actual GPU wattage and die temperature in real-time.
+- **App-Level Attribution**: Group GPU usage by resource coalitions, so you see the total impact of an app (including its helpers) rather than a fragmented list of processes.
+- **Developer Tooling**: Measure the GPU impact of specific commands with `run`, record sessions for later analysis, and export metrics to Prometheus.
+- **Architectural Insight**: Identify GPU throttling via limiter states and see the breakdown of firmware utilization (renderer vs. tiler).
+- **Zero Interference**: Designed to be invisible to the GPU driver, ensuring that the act of monitoring doesn't skew the results.
+
+## Use Cases
+
+`macgpu` is useful for a variety of scenarios where standard monitors fall short:
+
+- **Performance Profiling**: Use `macgpu run` to get a precise energy and time budget for a specific script or binary, making it ideal for benchmarking AI models or rendering pipelines.
+- **Battery Life Optimization**: Identify "hidden" GPU drains by grouping usage at the app level, helping you find which background process is killing your laptop's endurance.
+- **Thermal Analysis**: Correlate spikes in GPU power with die temperature and limiter states to determine if your hardware is thermally throttling during heavy loads.
+- **Automated Regressions**: Integrate `macgpu run --json` into your CI/CD pipeline to detect GPU performance regressions in new commits.
+- **Infrastructure Monitoring**: Use `macgpu serve` to feed real-time GPU metrics into a Prometheus/Grafana dashboard for monitoring a remote Mac workstation.
+- **Metal App Debugging**: Drill down to the `queue` level to see how different command buffers in your application are distributed across the GPU.
+
 `macgpu` reads the GPU driver's per-client counters, kernel resource
 coalitions, IOReport, and the SMC directly. It needs no sudo, does not spawn
 `ioreg` or `powermetrics`, and does not open a Metal device, so it never shows
@@ -30,6 +51,7 @@ instead.
 
 ```sh
 cargo build --release
+mise run install   # build if needed, then install to ~/.local/bin
 ```
 
 ## What it shows
