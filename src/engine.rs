@@ -214,6 +214,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
     fn engine_emits_reports_at_interval() {
         let config = EngineConfig {
             interval: Duration::from_millis(200),

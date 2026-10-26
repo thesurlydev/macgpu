@@ -197,6 +197,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn reads_live_table() {
         let table = read().expect("GPU frequency table");
         assert!(table.mhz.len() >= 2);

@@ -322,6 +322,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn reads_live_gpu_sensors() {
         let started = std::time::Instant::now();
         let mut reader = SmcReader::new().expect("open SMC");

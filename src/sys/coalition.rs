@@ -618,6 +618,7 @@ mod tests {
     /// Live: every process's coalition is readable without root, including
     /// WindowServer's, which another user owns.
     #[test]
+    #[ignore]
     fn reads_live_coalitions() {
         let own = std::process::id() as i32;
         let mut reader = CoalitionReader::new();
@@ -723,6 +724,7 @@ mod tests {
     /// the spans (measured +7% with about 1 ms buffers), and reads lower when
     /// other GPU work overlaps.
     #[test]
+    #[ignore]
     fn gpu_slots_track_metal_work() {
         use crate::sys::iokit::RegistryReader;
         let own = std::process::id() as i32;

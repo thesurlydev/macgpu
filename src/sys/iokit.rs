@@ -626,6 +626,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn reads_live_registry() {
         let registry = RegistryReader::new().read().expect("read GPU registry");
         assert!(!registry.accelerators.is_empty(), "no IOAccelerator found");

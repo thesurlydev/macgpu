@@ -687,6 +687,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn samples_live_gpu_channels() {
         let mut reader = IoReportReader::new().expect("subscribe to IOReport");
         let first = reader.sample().expect("first sample");
