@@ -1,0 +1,27 @@
+[package]
+name = "macgpu"
+version = "0.1.0"
+edition = "2024"
+description = "Per-process and per-app GPU usage, power, and memory for Apple Silicon Macs"
+readme = "README.md"
+rust-version = "1.85"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+crossterm = "0.29"
+libc = "0.2"
+mach2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+
+[profile.release]
+lto = "thin"
+strip = true
