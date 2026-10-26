@@ -717,10 +717,11 @@ mod tests {
     /// Live: pins the struct layout. Metal work in this process must show up in
     /// its coalition's `gpu_time` (slot 8, ns) at least as fully as the work's
     /// own command-buffer spans (the coalition counts in-flight time, and
-    /// other members only add to it), and `gpu_energy_nj` (slot 41) must imply
-    /// a plausible power. The process's `AppUsage` time must be close: it also
-    /// counts per-command-buffer overhead outside the spans (measured +7% with
-    /// about 1 ms buffers), and reads lower when other GPU work overlaps.
+    /// other members only add to it), and `gpu_energy_nj` (slot 41), once it
+    /// has settled, must imply a plausible power. The process's `AppUsage`
+    /// time must be close: it also counts per-command-buffer overhead outside
+    /// the spans (measured +7% with about 1 ms buffers), and reads lower when
+    /// other GPU work overlaps.
     #[test]
     fn gpu_slots_track_metal_work() {
         use crate::sys::iokit::RegistryReader;
@@ -746,11 +747,30 @@ mod tests {
         let elapsed = started.elapsed().as_secs_f64();
 
         let id = after.coalition_of(own).expect("own coalition");
-        let delta = after
-            .get(id)
-            .expect("own entry")
-            .usage
-            .since(&before.get(id).expect("own entry before").usage);
+        let before_usage = before.get(id).expect("own entry before").usage;
+        let mut delta = after.get(id).expect("own entry").usage.since(&before_usage);
+
+        // The kernel charges coalition GPU energy about 1-1.5 s after the
+        // work, so the first post-load read can hold almost none of it. Read
+        // until the counter stops catching up, or give up after a few seconds
+        // and let the assertion below report what did arrive. Idle accounting
+        // keeps adding a few millijoules every second, so only wait for
+        // increments above 1% of what has arrived. GPU time is charged
+        // promptly and stays with the first post-load read.
+        let mut energy_nj = after.get(id).expect("own entry").usage.gpu_energy_nj;
+        let mut changed = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < changed + Duration::from_secs(1) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            let reading = reader.read(&[own]).expect("coalitions");
+            let energy = reading.get(id).expect("own entry").usage.gpu_energy_nj;
+            let threshold = energy_nj.saturating_sub(before_usage.gpu_energy_nj) / 100;
+            if energy.saturating_sub(energy_nj) > threshold {
+                energy_nj = energy;
+                changed = Instant::now();
+            }
+        }
+        delta.gpu_energy_nj = energy_nj.saturating_sub(before_usage.gpu_energy_nj);
         let old = own_usage(&before_registry);
         let app_usage_ns: u64 = own_usage(&after_registry)
             .iter()

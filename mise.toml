@@ -1,0 +1,34 @@
+# macOS on Apple Silicon. Needs Rust 1.85 or newer (see Cargo.toml); the tasks
+# use the toolchain on PATH rather than pinning one here.
+
+[tasks.build]
+description = "Build the release binary"
+run = "cargo build --release"
+
+[tasks.build-debug]
+description = "Build the debug binary"
+run = "cargo build"
+
+[tasks.test]
+description = "Run the unit tests and the end-to-end tests, which put real load on the GPU"
+run = "cargo test"
+
+[tasks.test-unit]
+description = "Run the unit tests only; fast and no GPU load"
+run = "cargo test --lib"
+
+[tasks.test-e2e]
+description = "Run the end-to-end tests; generates real Metal load and takes about a minute"
+run = "cargo test --test apps_e2e --test attribution --test export_cli --test power_e2e"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks.clippy]
+description = "Lint with Clippy, warnings as errors"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.check]
+description = "Run format, lint, and the full test suite"
+depends = ["fmt", "clippy", "test"]
