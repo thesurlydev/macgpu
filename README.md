@@ -12,7 +12,7 @@ MacOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the
 - **Architectural Insight**: Identify GPU throttling via limiter states and see the breakdown of firmware utilization (renderer vs. tiler).
 - **Zero Interference**: Designed to be invisible to the GPU driver, ensuring that the act of monitoring doesn't skew the results.
 
-## ![screenshot](~/projects/macgpu/assets/screenshot.png)
+## ![screenshot](assets/screenshot.png)
 
 ## Use Cases
 
