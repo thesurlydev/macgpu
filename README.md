@@ -47,7 +47,7 @@ instead.
 ## Requirements
 
 - macOS on Apple Silicon.
-- Rust 1.85 or newer to build (edition 2024).
+- Rust 1.99.1 or newer to build (edition 2024).
 
 ```sh
 cargo build --release

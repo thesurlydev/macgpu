@@ -8,7 +8,7 @@ repository = "https://github.com/thesurlydev/macgpu"
 categories = ["cli", "system", "monitoring"]
 keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
 readme = "README.md"
-rust-version = "1.85"
+rust-version = "1.99.1"
 
 [dependencies]
 anyhow = "1"
