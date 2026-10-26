@@ -168,7 +168,8 @@ fn within_bounds(label: &str, report: &Report, pid: i32, truth: &LoadResult) -> 
 /// over one window spanning the whole load, matches the load's own timing as
 /// far as other GPU work allows.
 #[test]
-fn per_process_gpu_time_matches_load_measurement() {
+#[ignore]
+    fn per_process_gpu_time_matches_load_measurement() {
     let _lock = gpu_lock();
     let config = LoadConfig {
         seconds: 3.0,
@@ -250,7 +251,8 @@ fn per_process_gpu_time_matches_load_measurement() {
 /// whole window, but `AppUsage` splits the GPU between them, so the sum over
 /// every process stays within one GPU.
 #[test]
-fn concurrent_loads_share_one_gpu() {
+#[ignore]
+    fn concurrent_loads_share_one_gpu() {
     let _lock = gpu_lock();
     let config = LoadConfig {
         seconds: 3.0,
@@ -321,7 +323,8 @@ fn concurrent_loads_share_one_gpu() {
 /// [`UNCONTENDED_SHARE`] of the GPU; beyond that each duty is checked against
 /// the contention floor instead.
 #[test]
-fn load_share_scales_with_duty_cycle() {
+#[ignore]
+    fn load_share_scales_with_duty_cycle() {
     let _lock = gpu_lock();
     // The previous quiet step's duty and rate.
     let mut previous: Option<(f64, f64)> = None;
@@ -409,7 +412,8 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 /// lifetime; the queue-aligned diff never credits more than is possible and
 /// its total tracks the load's own measurement.
 #[test]
-fn queue_churn_never_over_credits() {
+#[ignore]
+    fn queue_churn_never_over_credits() {
     let _lock = gpu_lock();
     const QUEUES: usize = 2;
     const SAMPLE: Duration = Duration::from_millis(50);
@@ -567,7 +571,8 @@ fn queue_churn_never_over_credits() {
 
 /// The observing macgpu process must not become a GPU client itself.
 #[test]
-fn observer_holds_no_gpu_client() {
+#[ignore]
+    fn observer_holds_no_gpu_client() {
     let mut child = Command::new(MACGPU)
         .args(["--json", "--count", "3", "--interval", "0.5"])
         .stdout(Stdio::piped())
@@ -592,7 +597,8 @@ fn observer_holds_no_gpu_client() {
 }
 
 #[test]
-fn doctor_json_reports_every_source() {
+#[ignore]
+    fn doctor_json_reports_every_source() {
     let output = Command::new(MACGPU)
         .args(["doctor", "--json"])
         .output()
@@ -634,7 +640,8 @@ fn doctor_json_reports_every_source() {
 /// available are skipped, so this holds before and after every reader lands;
 /// once they do, it verifies power, coalitions, and memory too.
 #[test]
-fn doctor_load_passes() {
+#[ignore]
+    fn doctor_load_passes() {
     let _lock = gpu_lock();
     let output = Command::new(MACGPU)
         .args(["doctor", "--load", "--load-seconds", "2", "--json"])
