@@ -1,0 +1,28 @@
+description = """
+Does the server reuse the prompt prefix across fresh h1 processes, and what
+does a miss cost? h1 puts the date and the working directory into its system
+prompt, ahead of the skills block and the tool definitions, so a new
+directory changes the prefix early. stable-cwd runs every repeat in the same
+directory; fresh-cwd uses a new directory each time, like moving between
+projects; env-last moves the date and directory lines to the end of the
+system prompt. Compare cached %, 1st ttft, and prefill energy. Blocked order
+keeps each variant's cache warm, and the first run of each block is a
+warm-up that the summary leaves out.
+"""
+tasks = ["explain-function"]
+repeats = 5
+order = "blocked"
+warmup_repeats = 1
+
+[[variant]]
+name = "stable-cwd"
+workdir = "stable"
+
+[[variant]]
+name = "fresh-cwd"
+workdir = "fresh"
+
+[[variant]]
+name = "fresh-cwd-env-last"
+workdir = "fresh"
+system_prompt = "env-last"

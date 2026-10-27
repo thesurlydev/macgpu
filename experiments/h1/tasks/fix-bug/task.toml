@@ -1,0 +1,4 @@
+description = "Fix a one-line bug so the unit tests pass (read, edit, run tests)"
+prompt = "The tests in test_stats.py fail. Fix the bug in stats.py so that `python3 -m unittest` passes. Do not change the tests."
+check = "cmp -s test_stats.py \"$TASK_DIR/files/test_stats.py\" && python3 -m unittest -q"
+timeout = 900

@@ -1,0 +1,24 @@
+description = """
+How the per-tool output cap trades context and energy against success when a
+tool prints a lot. The test run prints about 120 KB of log noise before the
+failure. Smaller caps send fewer tokens per round trip but can cut off the
+part the model needs, which costs extra round trips. 24000 is h1's default.
+"""
+tasks = ["fix-noisy-test"]
+repeats = 3
+
+[[variant]]
+name = "cap-24000"
+args = ["--max-tool-output-bytes", "24000"]
+
+[[variant]]
+name = "cap-8000"
+args = ["--max-tool-output-bytes", "8000"]
+
+[[variant]]
+name = "cap-2000"
+args = ["--max-tool-output-bytes", "2000"]
+
+[[variant]]
+name = "cap-48000"
+args = ["--max-tool-output-bytes", "48000"]
