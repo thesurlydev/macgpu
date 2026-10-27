@@ -10,8 +10,8 @@ mod apps;
 mod device;
 mod processes;
 
-use crate::model::{Overhead, Report, SCHEMA_VERSION, SourceState, SourceStatus, source};
 use crate::snapshot::Snapshot;
+use macgpu_model::{Overhead, Report, SCHEMA_VERSION, SourceState, SourceStatus, source};
 
 pub use apps::ENERGY_SPAN_NS;
 pub use processes::align_queues;

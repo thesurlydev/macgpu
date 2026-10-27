@@ -247,7 +247,7 @@ Note: a child launched from a terminal shares the terminal's coalition. So per-c
 - **NDJSON** (exists today): add schema versioning and the new fields.
 - **`macgpu serve`.** A Prometheus exporter with `app`, `pid` and `process` labels, for per-process and per-app GPU time, watts and memory. macmon's exporter has no per-process data.
 - **`record` and `replay`.** Write samples to a file and replay them in the TUI. Useful for "what was using the GPU overnight" and for attaching to bug reports.
-- **Library crate.** Expose the sampler as a library crate so a future menu bar app or GUI can reuse the core.
+- **Library crate** (exists today). `macgpu-core` exposes the sampler, analysis, and engine so a menu bar app or GUI can reuse them, and `macgpu-model` holds the report schema for readers on any platform.
 
 ### 5.10 Events and alerts
 

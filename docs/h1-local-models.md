@@ -232,9 +232,10 @@ These keys are hypothetical. h1 has no such setting today.
 - **Intent layer:** the energy figure becomes another field on the existing
   usage data, next to tokens and cost. Nothing macOS-specific reaches
   `h1-core`.
-- **KISS:** reading JSON over HTTP adds no new Rust dependencies to h1.
-  Linking macgpu as a library would pull in its Apple-specific system crates
-  and make part of h1 macOS-only, so do not link it.
+- **KISS:** reading JSON over HTTP adds no Apple-specific dependencies to h1.
+  Do not link `macgpu-core`: it pulls in Apple system crates and would make
+  part of h1 macOS-only. If h1 wants typed reports, `macgpu-model` holds only
+  the serde types and builds on every platform.
 
 ### Limits to state in the UI
 

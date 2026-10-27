@@ -14,9 +14,9 @@
 //!   values are separate fields.
 
 use super::{RECENT_SECONDS, ms_per_s, pct};
-use crate::model::{Activity, ClientView, ProcessView, QueueView};
 use crate::snapshot::Snapshot;
 use crate::sys::iokit::{GpuClient, QueueUsage};
+use macgpu_model::{Activity, ClientView, ProcessView, QueueView};
 use std::collections::HashMap;
 
 pub(super) struct Built {

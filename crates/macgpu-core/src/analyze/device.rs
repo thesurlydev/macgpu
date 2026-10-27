@@ -2,15 +2,15 @@
 //! (from IOReport, SMC, and system sources) residency, clock, power, limiters,
 //! temperature, and pressure.
 
-use crate::model::{
-    DeviceView, Event, EventKind, FirmwareUtilization, PStateShare, Report, SourceState,
-    SourceStatus, StateShare, Temperature, source,
-};
 use crate::snapshot::Snapshot;
 use crate::sys::gpu_freq::FrequencyTable;
 use crate::sys::ioreport::{IoReportSample, channel, energy_to_joules};
 use crate::sys::smc::{self, GpuTemperatures};
 use crate::sys::system::{self, SystemContext};
+use macgpu_model::{
+    DeviceView, Event, EventKind, FirmwareUtilization, PStateShare, Report, SourceState,
+    SourceStatus, StateShare, Temperature, source,
+};
 use std::collections::BTreeMap;
 
 /// IOReport state names that mean the GPU is powered down rather than clocked.

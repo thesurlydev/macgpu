@@ -225,7 +225,7 @@ fn client_rows(report: &Report) -> Vec<Row> {
                 activity: if client.gpu_ns > 0 {
                     Activity::Active
                 } else {
-                    process.activity.min_recent()
+                    min_recent(process.activity)
                 },
                 last_submit_age_ms: client.last_submit_age_ms,
                 children: client.queues.len(),
@@ -281,13 +281,11 @@ fn share(part: u64, total: u64) -> f64 {
     }
 }
 
-impl Activity {
-    /// A client of an active process is not necessarily active itself.
-    fn min_recent(self) -> Activity {
-        match self {
-            Activity::Active => Activity::Recent,
-            other => other,
-        }
+/// A client of an active process is not necessarily active itself.
+fn min_recent(activity: Activity) -> Activity {
+    match activity {
+        Activity::Active => Activity::Recent,
+        other => other,
     }
 }
 

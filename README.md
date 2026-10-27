@@ -325,10 +325,22 @@ Every source works without root.
 ## Development
 
 ```sh
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
+
+The workspace has three crates:
+
+| Crate | Contents | Platforms |
+|---|---|---|
+| `macgpu-model` (`crates/macgpu-model`) | The versioned `Report` schema that `--json`, `record`, and `serve` emit | any |
+| `macgpu-core` (`crates/macgpu-core`) | System readers, the sampler, the analysis, and the background `Engine` | macOS |
+| `macgpu` (repository root) | The CLI and every front end | macOS |
+
+Another program can link `macgpu-core` to sample in-process, or depend on
+`macgpu-model` alone to read reports from `macgpu serve` or a recording on any
+platform.
 
 The end-to-end tests in `tests/` generate real GPU load through the hidden
 `macgpu __load` subcommand and check readings against invariants that hold

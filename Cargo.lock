@@ -778,11 +778,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "core-foundation",
- "core-foundation-sys",
  "crossterm",
  "libc",
- "mach2",
+ "macgpu-core",
+ "macgpu-model",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
@@ -790,6 +789,28 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny_http",
+]
+
+[[package]]
+name = "macgpu-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "core-foundation",
+ "core-foundation-sys",
+ "libc",
+ "macgpu-model",
+ "mach2",
+ "objc2-foundation",
+ "objc2-metal",
+ "serde",
+]
+
+[[package]]
+name = "macgpu-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

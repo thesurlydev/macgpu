@@ -1,0 +1,25 @@
+[package]
+name = "macgpu-core"
+version.workspace = true
+edition.workspace = true
+description = "The macgpu sampler, analysis, and background engine for Apple Silicon Macs"
+license.workspace = true
+repository.workspace = true
+categories = ["os::macos-apis"]
+keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+libc.workspace = true
+mach2 = "0.6"
+macgpu-model.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+# Tests run real Metal work to check GPU-time attribution. The library itself
+# never opens a Metal device.
+objc2-foundation.workspace = true
+objc2-metal.workspace = true

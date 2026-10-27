@@ -182,7 +182,7 @@ pub struct Totals {
 pub enum Activity {
     /// Used the GPU inside this window.
     Active,
-    /// Submitted work within the last [`crate::analyze::RECENT_SECONDS`].
+    /// Submitted work within the last `RECENT_SECONDS` (see `macgpu_core::analyze`).
     Recent,
     #[default]
     Idle,

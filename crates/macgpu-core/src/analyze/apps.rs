@@ -43,11 +43,11 @@
 //!   theirs when known).
 
 use super::{ms_per_s, pct};
-use crate::model::{AppView, ProcessView, Report, SourceState, SourceStatus, Unattributed, source};
 use crate::snapshot::Snapshot;
 use crate::sys::coalition::{Coalition, CoalitionTable, CoalitionUsage};
 use crate::sys::process::{ProcessInfo, bundle_name};
 use crate::sys::task_memory::{GraphicsMemory, MemoryTable};
+use macgpu_model::{AppView, ProcessView, Report, SourceState, SourceStatus, Unattributed, source};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Largest difference between coalition and `AppUsage` time seen in windows

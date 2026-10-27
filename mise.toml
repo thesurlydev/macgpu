@@ -1,5 +1,5 @@
-# macOS on Apple Silicon. Needs Rust 1.85 or newer (see Cargo.toml); the tasks
-# use the toolchain on PATH rather than pinning one here.
+# macOS on Apple Silicon. Needs the Rust version in Cargo.toml's rust-version;
+# the tasks use the toolchain on PATH rather than pinning one here.
 
 [tasks.build]
 description = "Build the release binary"
@@ -22,11 +22,11 @@ run = "cargo build"
 
 [tasks.test]
 description = "Run the unit tests and the end-to-end tests, which put real load on the GPU"
-run = "cargo test"
+run = "cargo test --workspace"
 
 [tasks.test-unit]
 description = "Run the unit tests only; fast and no GPU load"
-run = "cargo test --lib"
+run = "cargo test --workspace --lib"
 
 [tasks.test-e2e]
 description = "Run the end-to-end tests; generates real Metal load and takes about a minute"
@@ -34,12 +34,16 @@ run = "cargo test --test apps_e2e --test attribution --test export_cli --test po
 
 [tasks.fmt]
 description = "Check Rust formatting"
-run = "cargo fmt --check"
+run = "cargo fmt --all --check"
 
 [tasks.clippy]
 description = "Lint with Clippy, warnings as errors"
-run = "cargo clippy --all-targets -- -D warnings"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.check-model-linux]
+description = "Check that the report schema crate builds for Linux, where remote readers run"
+run = "cargo check -p macgpu-model --target x86_64-unknown-linux-gnu"
 
 [tasks.check]
-description = "Run format, lint, and the full test suite"
-depends = ["fmt", "clippy", "test"]
+description = "Run format, lint, the Linux schema check, and the full test suite"
+depends = ["fmt", "clippy", "check-model-linux", "test"]

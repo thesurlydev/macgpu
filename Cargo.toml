@@ -1,28 +1,46 @@
-[package]
-name = "macgpu"
+[workspace]
+members = [".", "crates/macgpu-core", "crates/macgpu-model"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Per-process and per-app GPU usage, power, and memory for Apple Silicon Macs"
 license = "MIT"
 repository = "https://github.com/thesurlydev/macgpu"
+rust-version = "1.99.1"
+
+[workspace.dependencies]
+anyhow = "1"
+libc = "0.2"
+macgpu-core = { path = "crates/macgpu-core" }
+macgpu-model = { path = "crates/macgpu-model" }
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+serde = { version = "1", features = ["derive"] }
+
+[package]
+name = "macgpu"
+version.workspace = true
+edition.workspace = true
+description = "Per-process and per-app GPU usage, power, and memory for Apple Silicon Macs"
+license.workspace = true
+repository.workspace = true
 categories = ["cli", "system", "monitoring"]
 keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
 readme = "README.md"
-rust-version = "1.99.1"
+rust-version.workspace = true
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
-core-foundation = "0.10"
-core-foundation-sys = "0.8"
 crossterm = "0.29"
-libc = "0.2"
-mach2 = "0.6"
+libc.workspace = true
+macgpu-core.workspace = true
+macgpu-model.workspace = true
 objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-metal = "0.3"
+objc2-foundation.workspace = true
+objc2-metal.workspace = true
 ratatui = "0.30"
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
 serde_json = "1"
 tiny_http = "0.12"
 

@@ -5,8 +5,8 @@
 //! [`ReportFeed`], so sampling cadence never depends on rendering.
 
 use crate::analyze::{AnalyzeOptions, Analyzer};
-use crate::model::Report;
 use crate::snapshot::{Sampler, SourceSet};
+use macgpu_model::Report;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};

@@ -1,0 +1,13 @@
+[package]
+name = "macgpu-model"
+version.workspace = true
+edition.workspace = true
+description = "The versioned report schema that macgpu emits, usable on any platform"
+license.workspace = true
+repository.workspace = true
+categories = ["data-structures"]
+keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
