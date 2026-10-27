@@ -169,7 +169,7 @@ fn within_bounds(label: &str, report: &Report, pid: i32, truth: &LoadResult) -> 
 /// far as other GPU work allows.
 #[test]
 #[ignore]
-    fn per_process_gpu_time_matches_load_measurement() {
+fn per_process_gpu_time_matches_load_measurement() {
     let _lock = gpu_lock();
     let config = LoadConfig {
         seconds: 3.0,
@@ -252,7 +252,7 @@ fn within_bounds(label: &str, report: &Report, pid: i32, truth: &LoadResult) -> 
 /// every process stays within one GPU.
 #[test]
 #[ignore]
-    fn concurrent_loads_share_one_gpu() {
+fn concurrent_loads_share_one_gpu() {
     let _lock = gpu_lock();
     let config = LoadConfig {
         seconds: 3.0,
@@ -324,7 +324,7 @@ fn within_bounds(label: &str, report: &Report, pid: i32, truth: &LoadResult) -> 
 /// the contention floor instead.
 #[test]
 #[ignore]
-    fn load_share_scales_with_duty_cycle() {
+fn load_share_scales_with_duty_cycle() {
     let _lock = gpu_lock();
     // The previous quiet step's duty and rate.
     let mut previous: Option<(f64, f64)> = None;
@@ -413,7 +413,7 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 /// its total tracks the load's own measurement.
 #[test]
 #[ignore]
-    fn queue_churn_never_over_credits() {
+fn queue_churn_never_over_credits() {
     let _lock = gpu_lock();
     const QUEUES: usize = 2;
     const SAMPLE: Duration = Duration::from_millis(50);
@@ -572,7 +572,7 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 /// The observing macgpu process must not become a GPU client itself.
 #[test]
 #[ignore]
-    fn observer_holds_no_gpu_client() {
+fn observer_holds_no_gpu_client() {
     let mut child = Command::new(MACGPU)
         .args(["--json", "--count", "3", "--interval", "0.5"])
         .stdout(Stdio::piped())
@@ -598,7 +598,7 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 
 #[test]
 #[ignore]
-    fn doctor_json_reports_every_source() {
+fn doctor_json_reports_every_source() {
     let output = Command::new(MACGPU)
         .args(["doctor", "--json"])
         .output()
@@ -641,7 +641,7 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 /// once they do, it verifies power, coalitions, and memory too.
 #[test]
 #[ignore]
-    fn doctor_load_passes() {
+fn doctor_load_passes() {
     let _lock = gpu_lock();
     let output = Command::new(MACGPU)
         .args(["doctor", "--load", "--load-seconds", "2", "--json"])

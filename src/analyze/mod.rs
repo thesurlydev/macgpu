@@ -1,7 +1,10 @@
 //! Turns two [`Snapshot`]s into a [`Report`].
 //!
 //! Everything here is a pure function of the snapshots, so accuracy rules are
-//! unit tested with hand-built inputs.
+//! unit tested with hand-built inputs. The one exception is app energy over
+//! consecutive windows: coalition energy moves in steps about 0.5 s apart, so
+//! an [`Analyzer`] carries the last second of it from window to window (see
+//! the `apps` module).
 
 mod apps;
 mod device;
@@ -10,6 +13,7 @@ mod processes;
 use crate::model::{Overhead, Report, SCHEMA_VERSION, SourceState, SourceStatus, source};
 use crate::snapshot::Snapshot;
 
+pub use apps::ENERGY_SPAN_NS;
 pub use processes::align_queues;
 
 /// A process or queue that submitted work within this many seconds, but not in
@@ -22,8 +26,47 @@ pub struct AnalyzeOptions {
     pub include_idle: bool,
 }
 
-/// Builds the report for the window from `previous` to `current`.
+/// Analyzes consecutive windows: each call's `previous` is the last call's
+/// `current`. Sampling loops use this rather than [`analyze`], so app energy
+/// in windows shorter than a second is split by the coalition energy of the
+/// last [`ENERGY_SPAN_NS`] rather than lost.
+#[derive(Debug, Clone, Default)]
+pub struct Analyzer {
+    options: AnalyzeOptions,
+    energy: apps::EnergyHistory,
+}
+
+impl Analyzer {
+    pub fn new(options: AnalyzeOptions) -> Self {
+        Self {
+            options,
+            energy: apps::EnergyHistory::default(),
+        }
+    }
+
+    pub fn set_options(&mut self, options: AnalyzeOptions) {
+        self.options = options;
+    }
+
+    /// Builds the report for the window from `previous` to `current`.
+    pub fn analyze(&mut self, previous: &Snapshot, current: &Snapshot) -> Report {
+        build(previous, current, &self.options, &mut self.energy)
+    }
+}
+
+/// Builds the report for one window from `previous` to `current` on its own.
+/// App energy in a window shorter than [`ENERGY_SPAN_NS`] then sees only that
+/// window's coalition energy; use an [`Analyzer`] for consecutive windows.
 pub fn analyze(previous: &Snapshot, current: &Snapshot, options: &AnalyzeOptions) -> Report {
+    Analyzer::new(*options).analyze(previous, current)
+}
+
+fn build(
+    previous: &Snapshot,
+    current: &Snapshot,
+    options: &AnalyzeOptions,
+    energy: &mut apps::EnergyHistory,
+) -> Report {
     let window_ns = current
         .at
         .saturating_duration_since(previous.at)
@@ -60,6 +103,7 @@ pub fn analyze(previous: &Snapshot, current: &Snapshot, options: &AnalyzeOptions
         current,
         window_ns,
         options.include_idle,
+        energy,
         &mut report,
     );
 

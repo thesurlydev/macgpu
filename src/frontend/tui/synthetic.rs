@@ -158,7 +158,14 @@ const SPECS: &[Spec] = &[
             ),
             (0x1000_0b3f, &[("Metal", 0.15)]),
         ],
-        busy: |t, _| 35.0 + 15.0 * (t / 7.0).sin() + if (t as u64) % 17 == 0 { 40.0 } else { 0.0 },
+        busy: |t, _| {
+            35.0 + 15.0 * (t / 7.0).sin()
+                + if (t as u64).is_multiple_of(17) {
+                    40.0
+                } else {
+                    0.0
+                }
+        },
         alive: None,
     },
     Spec {

@@ -27,7 +27,7 @@
 //! estimate.
 
 use super::signals;
-use crate::analyze::{AnalyzeOptions, analyze};
+use crate::analyze::{AnalyzeOptions, Analyzer};
 use crate::cli::{SamplingArgs, SourceName, parse_interval};
 use crate::format;
 use crate::model::Report;
@@ -106,7 +106,7 @@ pub fn run(args: &RunArgs) -> Result<i32> {
     }
     .sources();
     let interval = Duration::from_secs_f64(args.interval);
-    let options = AnalyzeOptions { include_idle: true };
+    let mut analyzer = Analyzer::new(AnalyzeOptions { include_idle: true });
 
     signals::install(&FORWARDED);
     let mut sampler = Sampler::new(sources);
@@ -156,7 +156,7 @@ pub fn run(args: &RunArgs) -> Result<i32> {
                 let wall = started.elapsed();
                 tree.refresh();
                 let current = sampler.snapshot();
-                let report = analyze(&previous, &current, &options);
+                let report = analyzer.analyze(&previous, &current);
                 measurement.add(&report, &mut tree);
                 measurement.wall_seconds = wall.as_secs_f64();
                 break status;
@@ -164,7 +164,7 @@ pub fn run(args: &RunArgs) -> Result<i32> {
             Err(RecvTimeoutError::Timeout) => {
                 if Instant::now() >= due {
                     let current = sampler.snapshot();
-                    let report = analyze(&previous, &current, &options);
+                    let report = analyzer.analyze(&previous, &current);
                     previous = current;
                     measurement.add(&report, &mut tree);
                     due += interval;

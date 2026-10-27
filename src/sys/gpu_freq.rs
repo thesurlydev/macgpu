@@ -92,7 +92,9 @@ fn u32_property(entry: &IoObject, key: &str) -> Option<usize> {
 /// checks would put wrong MHz on screen, which is worse than showing none.
 pub fn parse_table(data: &[u8], count: Option<usize>, tables: Option<usize>) -> Option<Vec<f64>> {
     let pairs: Vec<(u32, u32)> = data
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|chunk| {
             (
                 u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),

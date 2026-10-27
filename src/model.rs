@@ -286,7 +286,10 @@ pub struct QueueView {
 /// energy, with or without overlapping work. It trails the GPU time by about a
 /// second, so when IOReport's GPU power is known the apps' power is scaled to
 /// sum to `device.power_w` and the coalition energies decide only the split.
-/// The split still lags by about one window while a load ramps up or stops.
+/// The kernel credits coalition energy in steps about 0.5 s apart, so a window
+/// shorter than 0.9 s is split by the coalition energy of the trailing 0.9 s
+/// of windows. The split still lags by about a second while a load ramps up or
+/// stops.
 ///
 /// When resource coalitions are unavailable, apps are grouped by `.app` bundle
 /// from the process rows instead: `coalition_id` is then a synthetic key (high
@@ -336,9 +339,11 @@ pub struct AppView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub energy_j: Option<f64>,
     /// GPU power in the window. When IOReport's GPU power is known it is
-    /// `device.power_w` split by the coalitions' `gpu_energy_nj`, so the apps
-    /// sum to the device; otherwise the coalition's own `gpu_energy_nj` over
-    /// the window, which trails real power by about a second.
+    /// `device.power_w` split by the coalitions' `gpu_energy_nj` over the
+    /// window, or over the trailing 0.9 s for shorter windows, so the apps sum
+    /// to the device (by apportioned GPU time until any coalition energy has
+    /// moved); otherwise the coalition's own `gpu_energy_nj` at its average
+    /// rate over that span, which trails real power by about a second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_w: Option<f64>,
     /// GPU power other coalitions spent on this app's behalf (for example

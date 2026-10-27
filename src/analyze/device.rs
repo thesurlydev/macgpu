@@ -9,7 +9,7 @@ use crate::model::{
 use crate::snapshot::Snapshot;
 use crate::sys::gpu_freq::FrequencyTable;
 use crate::sys::ioreport::{IoReportSample, channel, energy_to_joules};
-use crate::sys::smc::GpuTemperatures;
+use crate::sys::smc::{self, GpuTemperatures};
 use crate::sys::system::{self, SystemContext};
 use std::collections::BTreeMap;
 
@@ -424,6 +424,15 @@ fn fill_temperature(temperatures: &GpuTemperatures, device: &mut DeviceView) -> 
                 SourceStatus::ok()
             }
         }
+        None if temperatures.not_reporting() => SourceStatus::with(
+            SourceState::Stale,
+            format!(
+                "GPU temperature sensors are not reporting (all {} read below {} C, as they \
+                 do for about a second at a time while the GPU idles); temperature left out",
+                temperatures.sensors.len(),
+                smc::MIN_PLAUSIBLE_C
+            ),
+        ),
         None => SourceStatus::with(
             SourceState::Unavailable,
             "no GPU temperature sensor gave a plausible reading",
@@ -961,11 +970,41 @@ mod tests {
             fill_temperature(&broken, &mut device).state,
             SourceState::Partial
         );
-        broken.sensors[1].celsius = 0.0;
+        broken.sensors[1].celsius = 400.0;
         assert_eq!(
             fill_temperature(&broken, &mut device).state,
             SourceState::Unavailable
         );
+    }
+
+    #[test]
+    fn idle_sensors_that_stop_reporting_leave_temperature_out() {
+        // An idle M4 Max's sensors read placeholders for about a second; 16
+        // of 44 read 1.6-1.8 C, which used to pass as a 2 C die.
+        let mut device = DeviceView::default();
+        let temperatures = GpuTemperatures {
+            sensors: [-4.0, 1.6, 0.0, 1.8]
+                .iter()
+                .cycle()
+                .take(44)
+                .enumerate()
+                .map(|(index, celsius)| SensorReading {
+                    key: format!("Tg{index:02}"),
+                    celsius: *celsius,
+                })
+                .collect(),
+        };
+        let status = fill_temperature(&temperatures, &mut device);
+        assert_eq!(status.state, SourceState::Stale);
+        assert!(
+            status
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not reporting"),
+            "{status:?}"
+        );
+        assert_eq!(device.temperature, None);
     }
 
     #[test]

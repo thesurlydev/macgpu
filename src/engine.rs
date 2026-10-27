@@ -4,7 +4,7 @@
 //! Front ends read reports from the engine (or from a recording) through
 //! [`ReportFeed`], so sampling cadence never depends on rendering.
 
-use crate::analyze::{AnalyzeOptions, analyze};
+use crate::analyze::{AnalyzeOptions, Analyzer};
 use crate::model::Report;
 use crate::snapshot::{Sampler, SourceSet};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -114,7 +114,7 @@ fn run(
     reports: mpsc::SyncSender<Report>,
     control: Receiver<Control>,
 ) {
-    let mut options = config.options;
+    let mut analyzer = Analyzer::new(config.options);
     let mut sampler = Sampler::new(config.sources);
     let mut previous = sampler.snapshot();
     let mut due = previous.at + interval;
@@ -132,7 +132,7 @@ fn run(
                     interval = new_interval;
                     due = previous.at + interval;
                 }
-                Ok(Control::SetOptions(new_options)) => options = new_options,
+                Ok(Control::SetOptions(options)) => analyzer.set_options(options),
                 Err(RecvTimeoutError::Timeout) => {
                     if due.saturating_duration_since(Instant::now()) > FIRMWARE_POLL / 2 {
                         sampler.poll_firmware();
@@ -143,7 +143,7 @@ fn run(
         }
 
         let current = sampler.snapshot();
-        let report = analyze(&previous, &current, &options);
+        let report = analyzer.analyze(&previous, &current);
         previous = current;
         if reports.send(report).is_err() {
             return;

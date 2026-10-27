@@ -28,6 +28,16 @@
 //!   a window's worth (31.8 W for one app against 17.2 W device). When
 //!   IOReport's GPU power is known, the apps' power is therefore scaled to sum
 //!   to it, and the coalition energies decide only the split.
+//! - The kernel credits coalition GPU energy in steps about 0.5 s apart, for
+//!   every coalition at once (M4 Max, macOS 27: 60 steps in 30 s, 0.49-0.51 s
+//!   apart), so most windows shorter than that see no energy for any app.
+//!   Splitting each window by its own energy lost that window's device energy:
+//!   at 0.25 s windows the apps summed to 49% of IOReport's energy, and
+//!   `macgpu run` at 0.1 s reported a fifth of a load's energy. The split
+//!   therefore uses the coalition energy of a trailing span of at least
+//!   [`ENERGY_SPAN_NS`] (see [`EnergyHistory`]), which always contains a step;
+//!   a window that long is split by its own energy alone. Before the first
+//!   step is seen the device energy is split by apportioned GPU time.
 //! - A process's GPU power is an estimate: the app's measured GPU power split
 //!   by the process's share of the app's apportioned time (exited tasks keep
 //!   theirs when known).
@@ -38,7 +48,7 @@ use crate::snapshot::Snapshot;
 use crate::sys::coalition::{Coalition, CoalitionTable, CoalitionUsage};
 use crate::sys::process::{ProcessInfo, bundle_name};
 use crate::sys::task_memory::{GraphicsMemory, MemoryTable};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Largest difference between coalition and `AppUsage` time seen in windows
 /// without exits or overlap: the two counters are credited at slightly
@@ -53,22 +63,71 @@ const OVERLAP_UNCERTAINTY: f64 = 0.25;
 /// Marks synthetic app keys used when coalitions are unavailable.
 const SYNTHETIC_ID_BIT: u64 = 1 << 63;
 
+/// Shortest trailing span whose coalition GPU energy splits a window's energy
+/// among apps. Coalition energy moves in steps about 0.5 s apart, so a span
+/// this long always contains one. It is a little under a second so a 1 s
+/// window, whose length jitters by a few ms, is split by its own energy alone.
+pub const ENERGY_SPAN_NS: u64 = 900_000_000;
+
+/// Coalition GPU energy of the most recent consecutive windows, carried from
+/// one window to the next by [`super::Analyzer`]: as few windows, ending with
+/// the current one, as cover [`ENERGY_SPAN_NS`].
+#[derive(Debug, Clone, Default)]
+pub struct EnergyHistory {
+    /// Oldest first: each window's length and its coalitions' nonzero GPU
+    /// energy, in nanojoules.
+    windows: VecDeque<(u64, Vec<(u64, u64)>)>,
+}
+
+impl EnergyHistory {
+    pub fn clear(&mut self) {
+        self.windows.clear();
+    }
+
+    /// Adds the current window and drops older windows the span no longer needs.
+    fn push(&mut self, window_ns: u64, energy_nj: Vec<(u64, u64)>) {
+        self.windows.push_back((window_ns, energy_nj));
+        let mut span_ns = self.span_ns();
+        while self.windows.len() > 1 {
+            let oldest = self.windows[0].0;
+            if span_ns.saturating_sub(oldest) < ENERGY_SPAN_NS {
+                break;
+            }
+            span_ns -= oldest;
+            self.windows.pop_front();
+        }
+    }
+
+    fn span_ns(&self) -> u64 {
+        self.windows.iter().fold(0u64, |total, (window_ns, _)| {
+            total.saturating_add(*window_ns)
+        })
+    }
+
+    /// Each coalition's GPU energy over the span.
+    fn energy_nj(&self) -> HashMap<u64, u64> {
+        let mut totals: HashMap<u64, u64> = HashMap::new();
+        for (id, nj) in self.windows.iter().flat_map(|(_, energy)| energy) {
+            let total = totals.entry(*id).or_default();
+            *total = total.saturating_add(*nj);
+        }
+        totals
+    }
+}
+
 pub(super) fn fill(
     previous: &Snapshot,
     current: &Snapshot,
     window_ns: u64,
     include_idle: bool,
+    history: &mut EnergyHistory,
     report: &mut Report,
 ) {
     fill_memory(current.memory.as_ref(), report);
 
     match &current.coalitions {
         Some(Ok(table)) => {
-            let baseline = match &previous.coalitions {
-                Some(Ok(baseline)) => Some(baseline),
-                _ => None,
-            };
-            let status = if baseline.is_some() {
+            let status = if coalitions(previous).is_some() {
                 SourceStatus::ok()
             } else {
                 SourceStatus::with(SourceState::Partial, "previous sample failed; no deltas")
@@ -80,13 +139,14 @@ pub(super) fn fill(
                 previous,
                 current,
                 table,
-                baseline,
                 window_ns,
                 include_idle,
+                history,
                 report,
             );
         }
         Some(Err(error)) => {
+            history.clear();
             report.sources.insert(
                 source::COALITIONS.to_string(),
                 SourceStatus::with(
@@ -97,6 +157,7 @@ pub(super) fn fill(
             from_bundles(window_ns, include_idle, report);
         }
         None => {
+            history.clear();
             report.sources.insert(
                 source::COALITIONS.to_string(),
                 SourceStatus::with(SourceState::Disabled, "disabled; apps grouped by bundle"),
@@ -173,15 +234,26 @@ struct Included<'a> {
     gpu_ns: u64,
 }
 
+/// The snapshot's coalition table, when it was read.
+fn coalitions(snapshot: &Snapshot) -> Option<&CoalitionTable> {
+    match &snapshot.coalitions {
+        Some(Ok(table)) => Some(table),
+        _ => None,
+    }
+}
+
+/// App rows from `table`, the current coalitions, with window deltas from the
+/// previous sample's coalitions when it has them.
 fn from_coalitions(
     previous: &Snapshot,
     current: &Snapshot,
     table: &CoalitionTable,
-    baseline: Option<&CoalitionTable>,
     window_ns: u64,
     include_idle: bool,
+    history: &mut EnergyHistory,
     report: &mut Report,
 ) {
+    let baseline = coalitions(previous);
     let mut members: HashMap<u64, Members> = HashMap::new();
     for (index, process) in report.processes.iter_mut().enumerate() {
         process.coalition_id = table.coalition_of(process.pid);
@@ -230,6 +302,22 @@ fn from_coalitions(
         })
         .collect();
 
+    // The energy that splits this window: the trailing span's.
+    let energy = table.has_gpu_energy && baseline.is_some();
+    if energy {
+        let moved = deltas
+            .iter()
+            .filter(|(_, delta)| delta.gpu_energy_nj > 0)
+            .map(|(id, delta)| (*id, delta.gpu_energy_nj))
+            .collect();
+        history.push(window_ns, moved);
+    } else {
+        history.clear();
+    }
+    let span_energy_nj = history.energy_nj();
+    let span_ns = history.span_ns();
+    let span_energy = |id: u64| span_energy_nj.get(&id).copied().unwrap_or(0);
+
     let empty = Members::default();
     let evidence = |id: u64| {
         let app = members.get(&id).unwrap_or(&empty);
@@ -256,6 +344,7 @@ fn from_coalitions(
         let active = delta.gpu_ns > 0
             || delta.gpu_energy_nj > 0
             || delta.gpu_energy_billed_to_me_nj > 0
+            || span_energy(coalition.id) > 0
             || app.attributed_ns > 0;
         if !active && !(include_idle && !app.processes.is_empty()) {
             continue;
@@ -320,16 +409,26 @@ fn from_coalitions(
     // Pass 2: the views.
     let window_seconds = window_ns as f64 / 1e9;
     let watts = |nj: u64| nj as f64 / 1e9 / window_seconds;
-    let energy = table.has_gpu_energy && baseline.is_some();
     let ane = table.has_ane && baseline.is_some();
-    // Coalition energy decides the split; IOReport's GPU power, when known,
-    // the total (coalition energy trails it by about a second).
-    let coalition_nj = included.iter().fold(0u64, |total, entry| {
-        total.saturating_add(entry.delta.gpu_energy_nj)
+    // Coalition energy over the trailing span decides the split; IOReport's GPU
+    // energy, when known, the total (coalition energy trails it by about a
+    // second). Before any coalition energy is seen, apportioned GPU time splits
+    // it. Without IOReport, the span's coalition energy at its average rate.
+    let span_total_nj = included.iter().fold(0u64, |total, entry| {
+        total.saturating_add(span_energy(entry.coalition.id))
     });
-    let energy_scale = match report.device.power_w {
-        Some(device_w) if energy && coalition_nj > 0 => device_w / watts(coalition_nj),
-        _ => 1.0,
+    let device_nj = report
+        .device
+        .power_w
+        .map(|watts| watts * window_seconds * 1e9);
+    let energy_nj_of = |id: u64, gpu_ns: u64| match device_nj {
+        Some(device_nj) if span_total_nj > 0 => {
+            device_nj * span_energy(id) as f64 / span_total_nj as f64
+        }
+        Some(device_nj) if total_ns > 0 => device_nj * gpu_ns as f64 / total_ns as f64,
+        Some(_) => 0.0,
+        None if span_ns > 0 => span_energy(id) as f64 * window_ns as f64 / span_ns as f64,
+        None => 0.0,
     };
     let mut unattributed_total = 0u64;
     let mut partial = false;
@@ -347,7 +446,7 @@ fn from_coalitions(
             Some(exited) => unattributed_total = unattributed_total.saturating_add(exited),
             None => partial = baseline.is_some(),
         }
-        let energy_nj = delta.gpu_energy_nj as f64 * energy_scale;
+        let energy_nj = energy_nj_of(coalition.id, gpu_ns);
         let power_w = energy.then(|| energy_nj / 1e9 / window_seconds);
         if let Some(power_w) = power_w {
             // Split by apportioned time; exited tasks keep their known share.
@@ -763,7 +862,14 @@ mod tests {
         report.unattributed = None;
         report.device.active_pct = active_pct;
         report.device.power_w = power_w;
-        fill(previous, current, SECOND, false, &mut report);
+        fill(
+            previous,
+            current,
+            SECOND,
+            false,
+            &mut EnergyHistory::default(),
+            &mut report,
+        );
         report
     }
 
@@ -1047,6 +1153,196 @@ mod tests {
         // Without IOReport power the coalition figure stands.
         let report = with_device(&previous, &current, None, None);
         assert!((app(&report, 100).power_w.expect("power") - 2.0).abs() < 1e-9);
+    }
+
+    /// One sample of a sequence: Chrome's GPU helper (pid 11) and WindowServer
+    /// (pid 431) with these cumulative queue times and coalition energies.
+    fn sample(
+        base: Instant,
+        at_ms: u64,
+        (chrome_ns, chrome_nj): (u64, u64),
+        (ws_ns, ws_nj): (u64, u64),
+    ) -> Snapshot {
+        let clients = vec![
+            client(1, 11, vec![queue(SECOND + chrome_ns, at_ms * MS)]),
+            client(3, 431, vec![queue(SECOND + ws_ns, at_ms * MS)]),
+        ];
+        let mut snapshot = snapshot(base, Duration::from_millis(at_ms), at_ms * MS, clients);
+        snapshot.processes.insert(11, info(11, CHROME_GPU));
+        snapshot.processes.insert(431, info(431, WINDOW_SERVER));
+        snapshot.coalitions = Some(Ok(CoalitionTable::new(
+            vec![
+                coalition(
+                    100,
+                    usage(5 * SECOND + chrome_ns, chrome_nj, 3),
+                    vec![10, 11, 12],
+                    Some(info(10, CHROME)),
+                ),
+                coalition(395, usage(SECOND + ws_ns, ws_nj, 0), vec![431, 818], None),
+            ],
+            true,
+            true,
+        )));
+        snapshot
+    }
+
+    /// Analyzes consecutive windows with one carried history, as if IOReport
+    /// had measured `power_w` in each.
+    fn windows(samples: &[Snapshot], power_w: Option<f64>) -> Vec<Report> {
+        let mut history = EnergyHistory::default();
+        samples
+            .windows(2)
+            .map(|pair| {
+                let mut report = analyze(&pair[0], &pair[1], &AnalyzeOptions::default());
+                report.apps.clear();
+                report.unattributed = None;
+                report.device.power_w = power_w;
+                let window_ns = pair[1].at.duration_since(pair[0].at).as_nanos() as u64;
+                fill(
+                    &pair[0],
+                    &pair[1],
+                    window_ns,
+                    false,
+                    &mut history,
+                    &mut report,
+                );
+                report
+            })
+            .collect()
+    }
+
+    fn power_of(report: &Report, id: u64) -> f64 {
+        report
+            .apps
+            .iter()
+            .find(|app| app.coalition_id == id)
+            .and_then(|app| app.power_w)
+            .unwrap_or(0.0)
+    }
+
+    #[test]
+    fn short_windows_split_device_energy_over_the_trailing_span() {
+        // 30 windows of 100 ms at a steady 10 W. Chrome uses 60 ms/s of GPU
+        // time and WindowServer 20 ms/s, but their coalition energy moves only
+        // every 500 ms (windows 3, 8, 13, ...): 4:1 at first, 1:1 from window 13.
+        let base = Instant::now();
+        let (mut chrome_nj, mut ws_nj) = (0, 0);
+        let mut samples = vec![sample(base, 0, (0, 0), (0, 0))];
+        for window in 0..30u64 {
+            if window % 5 == 3 {
+                let (chrome, ws) = if window < 13 { (4, 1) } else { (1, 1) };
+                chrome_nj += chrome * SECOND;
+                ws_nj += ws * SECOND;
+            }
+            let at_ms = (window + 1) * 100;
+            samples.push(sample(
+                base,
+                at_ms,
+                (at_ms * 60 / 1000 * MS, chrome_nj),
+                (at_ms * 20 / 1000 * MS, ws_nj),
+            ));
+        }
+        let reports = windows(&samples, Some(10.0));
+
+        // Every window's device energy goes to the apps: none is lost and none
+        // is moved into another window.
+        for (index, report) in reports.iter().enumerate() {
+            let total: f64 = report.apps.iter().filter_map(|app| app.power_w).sum();
+            assert!((total - 10.0).abs() < 1e-9, "window {index}: {total} W");
+        }
+        let energy: f64 = reports
+            .iter()
+            .flat_map(|report| &report.apps)
+            .filter_map(|app| app.energy_j)
+            .sum();
+        assert!((energy - 30.0).abs() < 1e-9, "{energy} J");
+
+        // Before the first step, apportioned GPU time splits it: 60:20.
+        assert!((power_of(&reports[0], 100) - 7.5).abs() < 1e-9);
+        // Then the coalition energy of the last 900 ms: windows 3 to 12 see
+        // only 4:1 steps, window 13 the steps of windows 8 and 13 (5:2), and
+        // from window 17 only 1:1 steps.
+        for (index, report) in reports.iter().enumerate().take(13).skip(3) {
+            assert!((power_of(report, 100) - 8.0).abs() < 1e-9, "{index}");
+        }
+        assert!((power_of(&reports[13], 100) - 50.0 / 7.0).abs() < 1e-9);
+        for (index, report) in reports.iter().enumerate().skip(17) {
+            assert!((power_of(report, 100) - 5.0).abs() < 1e-9, "{index}");
+            assert!((power_of(report, 395) - 5.0).abs() < 1e-9, "{index}");
+        }
+        // Process estimates follow the app's power.
+        let helper = reports[20].process(11, 1_000_011).expect("helper");
+        assert!((helper.est_power_w.expect("estimate") - 5.0).abs() < 1e-9);
+
+        // A single window on its own sees no step between two steps, so only
+        // GPU time can split it.
+        let alone = with_device(&samples[5], &samples[6], None, Some(10.0));
+        assert!((power_of(&alone, 100) - 7.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn short_windows_without_device_power_spread_each_step_over_the_span() {
+        // No IOReport: one 0.9 J step of Chrome's coalition energy, in window
+        // 12, after Chrome stopped using the GPU. It is spread at 1 W over the
+        // 900 ms span, keeping its total, and Chrome stays a row while the
+        // step is in the span even though it used no GPU time.
+        let base = Instant::now();
+        let mut samples = vec![sample(base, 0, (0, 0), (0, 0))];
+        for window in 0..30u64 {
+            let chrome_nj = if window >= 12 { 900 * MS } else { 0 };
+            let at_ms = (window + 1) * 100;
+            samples.push(sample(
+                base,
+                at_ms,
+                (0, chrome_nj),
+                (at_ms * 20 / 1000 * MS, 0),
+            ));
+        }
+        let reports = windows(&samples, None);
+        for (index, report) in reports.iter().enumerate() {
+            let chrome = report.apps.iter().find(|app| app.coalition_id == 100);
+            if (12..21).contains(&index) {
+                let chrome = chrome.expect("chrome row");
+                assert!(
+                    (chrome.power_w.expect("power") - 1.0).abs() < 1e-9,
+                    "{index}"
+                );
+                assert_eq!(chrome.gpu_ns, 0);
+            } else {
+                assert!(chrome.is_none(), "window {index}");
+            }
+        }
+        let energy: f64 = reports
+            .iter()
+            .flat_map(|report| &report.apps)
+            .filter_map(|app| app.energy_j)
+            .sum();
+        assert!((energy - 0.9).abs() < 1e-9, "{energy} J");
+    }
+
+    #[test]
+    fn energy_span_covers_at_least_the_span() {
+        let mut history = EnergyHistory::default();
+        // 1 s windows, even a little short, are split by their own energy.
+        for window_ns in [SECOND, 998 * MS, 1_002 * MS, 998 * MS] {
+            history.push(window_ns, vec![(1, 5)]);
+            assert_eq!(history.windows.len(), 1);
+            assert_eq!(history.energy_nj()[&1], 5);
+        }
+        // Short windows keep the fewest that cover ENERGY_SPAN_NS.
+        for _ in 0..20 {
+            history.push(100 * MS, vec![(1, 1), (2, 3)]);
+        }
+        assert_eq!(history.windows.len(), 9);
+        assert_eq!(history.span_ns(), ENERGY_SPAN_NS);
+        assert_eq!(history.energy_nj()[&2], 27);
+        history.push(450 * MS, Vec::new());
+        history.push(450 * MS, Vec::new());
+        assert_eq!(history.windows.len(), 2);
+        history.push(2 * SECOND, Vec::new());
+        assert_eq!(history.windows.len(), 1);
+        history.clear();
+        assert_eq!(history.span_ns(), 0);
     }
 
     #[test]

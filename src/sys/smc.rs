@@ -27,7 +27,13 @@ const GPU_PREFIX: &[u8; 2] = b"Tg";
 const TYPE_FLOAT: u32 = u32::from_be_bytes(*b"flt ");
 
 /// Readings outside this range are treated as invalid rather than averaged.
-const MIN_PLAUSIBLE_C: f64 = 1.0;
+///
+/// While the GPU idles its sensors sometimes stop reporting for about a second
+/// at a time, all at once: on an M4 Max (macOS 27), twice in 4 minutes of idle,
+/// every `Tg` key read one of the fixed values -4.0, 0.0, 1.6, or 1.8 C between
+/// readings of 50-60 C. A running die is never colder than its surroundings,
+/// so anything below 10 C is one of these placeholders, not a temperature.
+pub const MIN_PLAUSIBLE_C: f64 = 10.0;
 const MAX_PLAUSIBLE_C: f64 = 150.0;
 
 #[repr(C)]
@@ -105,6 +111,16 @@ impl GpuTemperatures {
         let mean = valid.iter().sum::<f64>() / valid.len() as f64;
         let max = valid.iter().copied().fold(f64::MIN, f64::max);
         Some((mean, max, valid.len() as u32))
+    }
+
+    /// Whether every sensor read below [`MIN_PLAUSIBLE_C`]: the sensors are not
+    /// reporting, as happens for about a second at a time while the GPU idles.
+    pub fn not_reporting(&self) -> bool {
+        !self.sensors.is_empty()
+            && self
+                .sensors
+                .iter()
+                .all(|sensor| sensor.celsius < MIN_PLAUSIBLE_C)
     }
 }
 
@@ -310,7 +326,28 @@ mod tests {
             ],
         };
         assert_eq!(temperatures.summary(), Some((53.0, 56.0, 2)));
+        assert!(!temperatures.not_reporting());
         assert_eq!(GpuTemperatures::default().summary(), None);
+        assert!(!GpuTemperatures::default().not_reporting());
+    }
+
+    #[test]
+    fn idle_placeholders_are_not_temperatures() {
+        // What all 44 sensors of an idle M4 Max read for about a second.
+        let placeholders = GpuTemperatures {
+            sensors: [-4.0, 1.6, 0.0, 1.8, 1.6, -4.0]
+                .iter()
+                .enumerate()
+                .map(|(index, celsius)| reading(&format!("Tg{index}"), *celsius))
+                .collect(),
+        };
+        assert_eq!(placeholders.summary(), None);
+        assert!(placeholders.not_reporting());
+
+        let mut mixed = placeholders.clone();
+        mixed.sensors[0].celsius = 52.0;
+        assert_eq!(mixed.summary(), Some((52.0, 52.0, 1)));
+        assert!(!mixed.not_reporting());
     }
 
     #[test]

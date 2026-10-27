@@ -1073,7 +1073,7 @@ pub fn interval_label(interval: Duration) -> String {
 
 pub fn span_label(span_ms: u64) -> String {
     let seconds = span_ms / 1000;
-    if seconds >= 3600 && seconds % 3600 == 0 {
+    if seconds >= 3600 && seconds.is_multiple_of(3600) {
         format!("{}h", seconds / 3600)
     } else if seconds >= 60 {
         format!("{}m", seconds / 60)

@@ -306,10 +306,16 @@ Every source works without root.
   which samples every 100 ms.
 - **Very short command buffers** (under about 1 ms) read about 60-100 µs high
   each.
-- **App power lags real power** by about one window after a load starts or
-  stops, because coalition energy is updated late. Totals over a run match
-  IOReport within 0.1%.
+- **App power lags real power** by about a second after a load starts or
+  stops, because coalition energy is updated late. The kernel also updates it
+  only every 0.5 s, so windows shorter than 0.9 s split the GPU's power by the
+  apps' coalition energy over the last 0.9 s. At any interval the apps' power
+  sums to the GPU's power in every window in which an app used the GPU, and
+  totals over a run match IOReport within 0.1%.
 - **Graphics memory** of other users' processes needs root.
+- **GPU temperature gaps.** While the GPU idles, its sensors sometimes stop
+  reporting for about a second and read placeholder values near 0 C. Those
+  windows leave the temperature out, with the temperature source `stale`.
 - **Limiter names** (`FAST_DIE`, `PWR_ZONE`, and others) are undocumented.
   `macgpu` reports time spent in them, not their cause.
 - **Not counted:** the media engine (VideoToolbox), the Neural Engine, and the

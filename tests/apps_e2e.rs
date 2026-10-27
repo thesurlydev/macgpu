@@ -71,7 +71,7 @@ fn app_of(report: &Report, coalition_id: u64) -> Option<&AppView> {
 /// unattributed time when it can be separated from overlapping work.
 #[test]
 #[ignore]
-    fn exited_process_time_is_kept_by_coalition() {
+fn exited_process_time_is_kept_by_coalition() {
     let _lock = gpu_lock();
     const INTERVAL: Duration = Duration::from_secs(1);
     // Starts right after a window boundary and ends half way through the
@@ -227,7 +227,7 @@ fn app_of(report: &Report, coalition_id: u64) -> Option<&AppView> {
 /// quiet GPU, and there `AppUsage` reads a few percent above the coalition.
 #[test]
 #[ignore]
-    fn coalition_time_covers_load() {
+fn coalition_time_covers_load() {
     let _lock = gpu_lock();
     let mut child = spawn_held(&LoadConfig {
         seconds: 3.0,
@@ -300,7 +300,7 @@ fn app_of(report: &Report, coalition_id: u64) -> Option<&AppView> {
 /// difference between the two edges' IOReport energy.
 #[test]
 #[ignore]
-    fn coalition_energy_matches_ioreport() {
+fn coalition_energy_matches_ioreport() {
     let _lock = gpu_lock();
     let mut misses = Vec::new();
     for _ in 0..3 {
@@ -349,6 +349,142 @@ fn gpu_energy_j(report: &Report) -> f64 {
     report.device.power_w.expect("GPU power") * report.window_seconds
 }
 
+/// Sampling intervals for [`app_energy_matches_device_energy_at_every_interval`]:
+/// shorter than, equal to, and longer than coalition energy's 0.5 s step.
+const ENERGY_INTERVALS_MS: [u64; 4] = [100, 250, 500, 1000];
+
+/// The apps' energy sums to IOReport's GPU energy over a load at every
+/// sampling interval, and in no window does it exceed the device's.
+///
+/// The kernel credits coalition GPU energy in steps about 0.5 s apart, so most
+/// windows shorter than that see none for any app. Splitting each window by
+/// its own coalition energy lost those windows' energy: at 0.25 s the apps
+/// summed to about half of IOReport's. Every window's device energy is split
+/// among the apps, so the sum holds whatever else uses the GPU; only windows
+/// in which nothing used the GPU keep their (idle) energy unattributed.
+#[test]
+#[ignore]
+fn app_energy_matches_device_energy_at_every_interval() {
+    let _lock = gpu_lock();
+    let mut child = spawn_held(&LoadConfig {
+        seconds: 4.0,
+        duty: 0.6,
+        ..LoadConfig::default()
+    });
+    let engines: Vec<Engine> = ENERGY_INTERVALS_MS
+        .iter()
+        .map(|ms| {
+            Engine::start(EngineConfig {
+                interval: Duration::from_millis(*ms),
+                ..EngineConfig::default()
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    child.start().unwrap();
+    child.wait_done().unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let stop_ms = macgpu::sys::clock::unix_ms();
+    child.finish().unwrap();
+
+    for (engine, interval_ms) in engines.iter().zip(ENERGY_INTERVALS_MS) {
+        let (mut apps_j, mut device_j, mut windows) = (0.0, 0.0, 0);
+        loop {
+            let report = engine.recv().expect("report");
+            require(&report, source::COALITIONS);
+            require(&report, source::IOREPORT);
+            let device = gpu_energy_j(&report);
+            let apps: f64 = report.apps.iter().filter_map(|app| app.energy_j).sum();
+            assert!(
+                report
+                    .apps
+                    .iter()
+                    .all(|app| app.energy_j.unwrap_or(0.0) >= 0.0),
+                "negative app energy at {interval_ms} ms"
+            );
+            assert!(
+                apps <= device * (1.0 + 1e-9) + 1e-9,
+                "at {interval_ms} ms one window's apps used {apps:.4} J of the device's {device:.4} J"
+            );
+            apps_j += apps;
+            device_j += device;
+            windows += 1;
+            if report.timestamp_ms >= stop_ms {
+                break;
+            }
+        }
+        eprintln!(
+            "{interval_ms} ms: apps {apps_j:.2} J vs IOReport {device_j:.2} J ({:.3}) over {windows} windows",
+            apps_j / device_j
+        );
+        assert!(device_j > 2.0, "the load used only {device_j:.2} J");
+        assert!(
+            apps_j >= device_j * 0.98,
+            "at {interval_ms} ms the apps' energy {apps_j:.2} J is {:.1}% of IOReport's {device_j:.2} J",
+            apps_j / device_j * 100.0
+        );
+    }
+}
+
+/// Largest relative difference allowed between `run` energy at 0.1 s and 1 s.
+const RUN_ENERGY_TOLERANCE: f64 = 0.2;
+
+/// `macgpu run` reports about the same energy for a load at its default 0.1 s
+/// interval as at 1 s. Both measure the same load at the same time: an outer
+/// `run -i 0.1` runs an inner `run -i 1`, which runs the load, so other GPU work
+/// affects both alike. The outer tree also holds the inner macgpu, which never
+/// opens a Metal device. Before energy was split over a trailing span, the
+/// 0.1 s run reported about a fifth of the 1 s run's energy.
+///
+/// At any interval a run misses about a second of the load's energy, because
+/// coalition energy trails it: the load's first second is split by energy
+/// credited before it started, and its last second is credited after it
+/// exited. How much depends on where the 0.5 s energy steps and the window
+/// edges fall, so the two figures differ by up to about 1 s of 8 (4 s loads
+/// differed by up to 13%), hence [`RUN_ENERGY_TOLERANCE`].
+#[test]
+#[ignore]
+fn run_energy_does_not_depend_on_interval() {
+    let _lock = gpu_lock();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("apps-run-energy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let (outer, inner) = (dir.join("outer.json"), dir.join("inner.json"));
+    let status = std::process::Command::new(MACGPU)
+        .args(["run", "-i", "0.1", "-q", "-o"])
+        .arg(&outer)
+        .args(["--", MACGPU, "run", "-i", "1", "-q", "-o"])
+        .arg(&inner)
+        .args(["--", MACGPU, "__load", "--seconds", "8"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run macgpu");
+    assert!(status.success(), "{status}");
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("summary")).expect("json")
+    };
+    let (outer, inner) = (read(&outer), read(&inner));
+    let energy = |summary: &serde_json::Value| summary["energy_j"].as_f64().expect("energy_j");
+    let device = |summary: &serde_json::Value| {
+        summary["device_energy_j"]
+            .as_f64()
+            .expect("device_energy_j")
+    };
+    let (fast, slow) = (energy(&outer), energy(&inner));
+    eprintln!(
+        "run energy: {fast:.2} J at 0.1 s, {slow:.2} J at 1 s ({:.3}); device {:.2} J and {:.2} J",
+        fast / slow,
+        device(&outer),
+        device(&inner)
+    );
+    assert!(slow > 1.0, "the load used only {slow:.2} J at 1 s");
+    assert!(fast <= device(&outer) * (1.0 + 1e-9));
+    assert!(
+        (fast / slow - 1.0).abs() <= RUN_ENERGY_TOLERANCE,
+        "{fast:.2} J at 0.1 s against {slow:.2} J at 1 s"
+    );
+}
+
 /// A child holding a touched 1 GiB `MTLBuffer` shows 1 GiB of graphics
 /// memory (the plan measured 1028 MB).
 ///
@@ -356,7 +492,7 @@ fn gpu_energy_j(report: &Report) -> f64 {
 /// footprint carries about 160 MiB more, freed 1-2 s after the last submission.
 #[test]
 #[ignore]
-    fn graphics_memory_of_one_gib_buffer() {
+fn graphics_memory_of_one_gib_buffer() {
     const GIB: u64 = 1 << 30;
     let child = spawn_held(&LoadConfig {
         alloc_mib: 1024,
