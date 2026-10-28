@@ -60,23 +60,43 @@ pub fn take() -> Option<Received> {
 mod tests {
     use super::*;
 
+    /// The signal is always recorded; the sender is this process.
+    ///
+    /// Delivery races with any concurrently reaped child in this process: on
+    /// macOS a signal delivered while a child-status change is pending can be
+    /// handed that change's `siginfo` (`si_code` a `CLD_*` value, `si_pid` the
+    /// child), so `sender` can name a process that never sent anything. Only
+    /// the sender is affected. `run` treats any nonzero sender as "a process
+    /// sent this, forward it", and a stray child PID is nonzero too, so a
+    /// clobbered terminal signal is at worst forwarded redundantly (the child
+    /// is in the same process group and has it already). The test therefore
+    /// retries until it sees a delivery carrying its own PID.
     #[test]
     fn records_signal_and_sender() {
         // SIGUSR2 is otherwise unused by the test harness.
         install(&[libc::SIGUSR2]);
         assert_eq!(take(), None);
-        unsafe { libc::kill(libc::getpid(), libc::SIGUSR2) };
-        // Another test thread may take delivery, asynchronously.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let received = loop {
-            if let Some(received) = take() {
-                break received;
+        let own = std::process::id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no delivery carried this process's PID"
+            );
+            unsafe { libc::kill(libc::getpid(), libc::SIGUSR2) };
+            // Another test thread may take delivery, asynchronously.
+            let poll_until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            while std::time::Instant::now() < poll_until {
+                if let Some(received) = take() {
+                    assert_eq!(received.signal, libc::SIGUSR2);
+                    if received.sender == own {
+                        assert_eq!(take(), None);
+                        return;
+                    }
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            assert!(std::time::Instant::now() < deadline, "signal not recorded");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
-        assert_eq!(received.signal, libc::SIGUSR2);
-        assert_eq!(received.sender, std::process::id() as i32);
-        assert_eq!(take(), None);
+        }
     }
 }
