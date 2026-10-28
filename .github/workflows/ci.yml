@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -25,4 +25,4 @@ jobs:
         run: cargo check -p macgpu-model --target x86_64-unknown-linux-gnu
 
       - name: Run Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast

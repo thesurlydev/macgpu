@@ -68,6 +68,7 @@ fn idle_and_load_once(config: &LoadConfig) -> (Report, Report, f64) {
 /// Active residency and power rise under load; residency is integrated over
 /// the window, so it covers at least the time the load kept the GPU busy.
 #[test]
+#[ignore]
 fn active_residency_and_power_rise_under_load() {
     let _lock = gpu_lock();
     let (idle, load, busy_pct) = idle_and_load(&LoadConfig {
@@ -122,6 +123,7 @@ fn active_residency_and_power_rise_under_load() {
 
 /// GPU temperature is reported, plausible, and does not fall under load.
 #[test]
+#[ignore]
 fn temperature_is_reported_under_load() {
     let _lock = gpu_lock();
     let (idle, load, _) = idle_and_load(&LoadConfig {

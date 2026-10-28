@@ -344,4 +344,11 @@ platform.
 
 The end-to-end tests in `tests/` generate real GPU load through the hidden
 `macgpu __load` subcommand and check readings against invariants that hold
-even when other work shares the GPU. They take about a minute.
+even when other work shares the GPU. They take about a minute. Tests that
+need real GPU hardware are marked `#[ignore]`, because CI runs on macOS
+virtual machines that have no IOReport power, SMC sensors, or visible GPU
+clients. On an Apple Silicon Mac, run them too:
+
+```sh
+cargo test --workspace -- --include-ignored
+```
