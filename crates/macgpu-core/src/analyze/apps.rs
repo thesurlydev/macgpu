@@ -642,26 +642,44 @@ fn app_name(coalition: &Coalition, leader: Option<&ProcessInfo>) -> (String, Opt
 }
 
 /// Groups processes by `.app` bundle when coalitions are unavailable, so
-/// helpers still roll up into their app. Energy and exited time are unknown.
+/// helpers still roll up into their app. Every process is given its group's
+/// synthetic key as `coalition_id`, so the tree view, the app detail breakdown,
+/// and grouping-level switches link processes to their app row just as kernel
+/// coalitions do. Energy and exited time are unknown.
 fn from_bundles(window_ns: u64, include_idle: bool, report: &mut Report) {
-    let mut groups: BTreeMap<String, Vec<&ProcessView>> = BTreeMap::new();
-    for process in &report.processes {
-        let key = match process
-            .path
-            .as_deref()
-            .and_then(crate::sys::process::bundle_path)
-        {
-            Some(bundle) => bundle.to_string(),
-            None => format!("pid {} {}", process.pid, process.start_us),
-        };
-        groups.entry(key).or_default().push(process);
+    // The synthetic id per process, keyed by `.app` bundle (or by the process
+    // when it has none). Setting `process.coalition_id` links every process to
+    // its app row exactly as kernel coalitions do, so the tree view, the app
+    // detail breakdown, and level switches all work with bundle grouping.
+    let ids: Vec<u64> = report
+        .processes
+        .iter()
+        .map(|process| {
+            let key = match process
+                .path
+                .as_deref()
+                .and_then(crate::sys::process::bundle_path)
+            {
+                Some(bundle) => bundle.to_string(),
+                None => format!("pid {} {}", process.pid, process.start_us),
+            };
+            synthetic_id(&key)
+        })
+        .collect();
+    for (process, id) in report.processes.iter_mut().zip(&ids) {
+        process.coalition_id = Some(*id);
+    }
+
+    let mut groups: BTreeMap<u64, Vec<&ProcessView>> = BTreeMap::new();
+    for (process, id) in report.processes.iter().zip(&ids) {
+        groups.entry(*id).or_default().push(process);
     }
     let total_ns = report
         .processes
         .iter()
         .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
 
-    for (key, processes) in groups {
+    for (id, processes) in groups {
         let gpu_ns = processes
             .iter()
             .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
@@ -677,7 +695,7 @@ fn from_bundles(window_ns: u64, include_idle: bool, report: &mut Report) {
             None => processes[0].name.clone(),
         };
         report.apps.push(AppView {
-            coalition_id: synthetic_id(&key),
+            coalition_id: id,
             name,
             bundle_path: bundle.map(str::to_string),
             responsible_pid: None,
@@ -1482,11 +1500,26 @@ mod tests {
         assert_eq!(chrome.unattributed_gpu_ns, None);
         assert_eq!(report.apps[1].name, "WindowServer");
         assert!(report.unattributed.is_none());
-        assert!(
+        // Every process is linked to its synthetic app row, as with coalitions.
+        let chrome_id = chrome.coalition_id;
+        assert!(chrome_id & SYNTHETIC_ID_BIT != 0);
+        assert_eq!(
             report
-                .processes
-                .iter()
-                .all(|process| process.coalition_id.is_none())
+                .process(11, 1_000_011)
+                .and_then(|process| process.coalition_id),
+            Some(chrome_id)
+        );
+        assert_eq!(
+            report
+                .process(12, 1_000_012)
+                .and_then(|process| process.coalition_id),
+            Some(chrome_id)
+        );
+        assert_eq!(
+            report
+                .process(431, 1_000_431)
+                .and_then(|process| process.coalition_id),
+            Some(report.apps[1].coalition_id)
         );
 
         current.coalitions = None;

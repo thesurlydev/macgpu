@@ -441,6 +441,72 @@ fn tree_falls_back_to_parents_without_coalitions() {
     assert_eq!(app.rows[chrome + 1].depth, 1);
 }
 
+/// With bundle grouping (coalitions disabled) the report gives every process
+/// its group's synthetic coalition id, so the tree nests processes under their
+/// app header instead of listing each app header with no children and every
+/// process again as a flat row. Mirrors what `analyze::apps::from_bundles`
+/// emits: app rows keyed by bundle, and each process pointing at its group.
+#[test]
+fn tree_nests_processes_under_bundle_apps() {
+    let mut app = app();
+    let mut report = synthetic::report(30, SECOND, true);
+    let mut groups: std::collections::BTreeMap<String, Vec<i32>> = Default::default();
+    for process in &report.processes {
+        let key = process
+            .path
+            .as_deref()
+            .and_then(crate::sys::process::bundle_path)
+            .map(str::to_string)
+            .unwrap_or_else(|| process.name.clone());
+        groups.entry(key).or_default().push(process.pid);
+    }
+    report.apps.clear();
+    for process in &mut report.processes {
+        process.coalition_id = None;
+    }
+    for (index, (bundle, pids)) in groups.iter().enumerate() {
+        let coalition_id = 1 << 63 | index as u64;
+        let members: Vec<_> = report
+            .processes
+            .iter()
+            .filter(|process| pids.contains(&process.pid))
+            .collect();
+        let gpu_ns = members.iter().map(|process| process.gpu_ns).sum();
+        report.apps.push(crate::model::AppView {
+            coalition_id,
+            name: crate::sys::process::bundle_name(bundle).to_string(),
+            bundle_path: Some(bundle.clone()),
+            gpu_ns,
+            attributed_gpu_ns: gpu_ns,
+            members: pids.len(),
+            gpu_pids: pids.clone(),
+            ..crate::model::AppView::default()
+        });
+        for process in &mut report.processes {
+            if pids.contains(&process.pid) {
+                process.coalition_id = Some(coalition_id);
+            }
+        }
+    }
+    app.push_report(report, false);
+    press(&mut app, &[KeyCode::Char('t')]);
+    let rows = &app.rows;
+    let header = |name: &str| {
+        rows.iter()
+            .position(|row| row.row.name == name && row.depth == 0)
+            .unwrap_or_else(|| panic!("no header {name}"))
+    };
+    let chrome = header("Google Chrome");
+    assert_eq!(rows[chrome + 1].row.name, "Google Chrome Helper (GPU)");
+    assert_eq!(rows[chrome + 1].depth, 1);
+    // No GPU process is orphaned at depth 0 beside its own app header.
+    let orphans = rows
+        .iter()
+        .filter(|row| row.depth == 0 && row.row.pid.is_some())
+        .count();
+    assert_eq!(orphans, 0, "{rows:?}");
+}
+
 // ---- state machine ----------------------------------------------------------
 
 #[test]

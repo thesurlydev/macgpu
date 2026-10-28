@@ -200,7 +200,9 @@ pub struct ProcessView {
     pub uid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ppid: Option<i32>,
-    /// Resource coalition this process belongs to (the app).
+    /// Resource coalition this process belongs to (the app). When resource
+    /// coalitions are unavailable it is the synthetic bundle key instead (see
+    /// [`AppView`]), so it still links the process to its app row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalition_id: Option<u64>,
 
