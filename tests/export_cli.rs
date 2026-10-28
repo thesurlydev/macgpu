@@ -217,6 +217,33 @@ fn log_stops_cleanly_on_sigterm() {
     );
 }
 
+/// `macgpu --watch | head` closes the pipe on the reader's side; macgpu must
+/// treat the resulting EPIPE as a normal stop and exit 0, not report it as an
+/// error the way `log` and `record` already do.
+#[test]
+fn printed_table_stops_cleanly_on_broken_pipe() {
+    for args in [
+        vec!["--watch", "-i", "0.2"],
+        vec!["--json", "--watch", "-i", "0.2"],
+    ] {
+        let mut child = macgpu()
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Read one sample, then close the read end so the next write fails.
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("first sample");
+        assert!(!line.is_empty(), "no output for {args:?}");
+        drop(reader);
+        let status = wait_timeout(&mut child, Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("macgpu {args:?} did not stop after the pipe closed"));
+        assert_eq!(status.code(), Some(0), "macgpu {args:?} exited on EPIPE");
+    }
+}
+
 /// Waits until `parent` has a child process named `name`.
 fn wait_for_child_named(parent: u32, name: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;

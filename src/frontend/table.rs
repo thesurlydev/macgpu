@@ -48,30 +48,40 @@ pub fn run(args: &ViewArgs) -> Result<i32> {
     let mut printed = 0usize;
     let mut alert_fired = false;
 
-    while let Some(mut report) = engine.recv() {
-        alert_fired |= alerts.evaluate(&mut report);
-        if args.json {
-            let text = if count == Some(1) {
-                serde_json::to_string_pretty(&report)?
+    let result = (|| -> io::Result<()> {
+        while let Some(mut report) = engine.recv() {
+            alert_fired |= alerts.evaluate(&mut report);
+            if args.json {
+                let text = if count == Some(1) {
+                    serde_json::to_string_pretty(&report).map_err(io::Error::other)?
+                } else {
+                    serde_json::to_string(&report).map_err(io::Error::other)?
+                };
+                writeln!(stdout, "{text}")?;
             } else {
-                serde_json::to_string(&report)?
-            };
-            writeln!(stdout, "{text}")?;
-        } else {
-            if clear {
-                write!(stdout, "\x1b[2J\x1b[H")?;
+                if clear {
+                    write!(stdout, "\x1b[2J\x1b[H")?;
+                }
+                write!(stdout, "{}", render(&report, &options))?;
             }
-            write!(stdout, "{}", render(&report, &options))?;
-        }
-        stdout.flush().context("failed to flush stdout")?;
+            stdout.flush()?;
 
-        printed += 1;
-        if count.is_some_and(|count| printed >= count) {
-            break;
+            printed += 1;
+            if count.is_some_and(|count| printed >= count) {
+                break;
+            }
+            if args.alerts.exit_on_alert && alert_fired {
+                break;
+            }
         }
-        if args.alerts.exit_on_alert && alert_fired {
-            break;
-        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {}
+        // `macgpu --watch | head` closes the pipe: a normal way to stop.
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => return Err(error).context("failed to write output"),
     }
 
     Ok(if args.alerts.exit_on_alert && alert_fired {
