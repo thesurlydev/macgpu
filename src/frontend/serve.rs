@@ -873,7 +873,8 @@ fn device_families(out: &mut Families, report: &Report, exporter: &Exporter) {
     for limiter in &device.limiters {
         out.gauge(
             "macgpu_gpu_limiter_residency_ratio",
-            "Share of the window in each power-controller limiter state (IOReport PWRCTRL).",
+            "Share of powered GPU time (every state but IDLE_OFF) in each power-controller state \
+             (IOReport PWRCTRL), not of the window; a state does not always lower the clock.",
             labels(&[("state", &limiter.name)]),
             limiter.pct / 100.0,
         );
