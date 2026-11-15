@@ -44,6 +44,9 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 description = "Check that the report schema crate builds for Linux, where remote readers run"
 run = "cargo check -p macgpu-model --target x86_64-unknown-linux-gnu"
 
-[tasks.check]
+# `gate` is the name every repo uses for its full pre-commit check; `check`
+# stays as an alias.
+[tasks.gate]
 description = "Run format, lint, the Linux schema check, and the full test suite"
+alias = "check"
 depends = ["fmt", "clippy", "check-model-linux", "test"]
