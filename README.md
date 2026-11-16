@@ -1,6 +1,6 @@
 # macgpu
 
-See how the Apple Silicon GPU is being used, and by which processes and apps.
+Apple Silicon GPU monitor with per-process and per-app usage, power attribution, memory, thermals, and Prometheus export.
 
 ## Why macgpu?
 
@@ -9,7 +9,7 @@ macOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the
 - **Detailed Power & Thermals**: Track actual GPU wattage and die temperature in real-time.
 - **App-Level Attribution**: Group GPU usage by resource coalitions, so you see the total impact of an app (including its helpers) rather than a fragmented list of processes.
 - **Developer Tooling**: Measure the GPU impact of specific commands with `run`, record sessions for later analysis, and export metrics to Prometheus.
-- **Architectural Insight**: Identify GPU throttling via limiter states and see the breakdown of firmware utilization (renderer vs. tiler).
+- **Architectural Insight**: See how long the GPU spent under power and thermal limiter states, and the breakdown of firmware utilization (renderer vs. tiler).
 - **Zero Interference**: The sampler does not open a Metal device, so it does not appear as a GPU client and skew the results.
 
 
@@ -17,20 +17,20 @@ macOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the
 
 `macgpu` is useful for a variety of scenarios where standard monitors fall short:
 
-- **Performance Profiling**: Use `macgpu run` to get a precise energy and time budget for a specific script or binary, making it ideal for benchmarking AI models or rendering pipelines.
+- **Performance Profiling**: Use `macgpu run` to get a detailed GPU time and energy estimate for a specific script or binary, which suits benchmarking AI models or rendering pipelines. Energy is apportioned by GPU time, not metered per process.
 - **Battery Life Optimization**: Identify "hidden" GPU drains by grouping usage at the app level, helping you find which background process is killing your laptop's endurance.
-- **Thermal Analysis**: Correlate spikes in GPU power with die temperature and limiter states to determine if your hardware is thermally throttling during heavy loads.
-- **Automated Regressions**: Integrate `macgpu run --json` into your CI/CD pipeline to detect GPU performance regressions in new commits.
+- **Thermal Analysis**: Correlate spikes in GPU power with die temperature and limiter states to see whether your hardware spends heavy loads under power or thermal limits.
+- **Automated Regressions**: Run `macgpu run --json` on a self-hosted Apple Silicon machine with real GPU access to track GPU time and energy across commits. Hosted macOS CI runners are virtual machines with no GPU power, temperature, or client data, and energy is apportioned, so expect noise and compare against a baseline.
 - **Infrastructure Monitoring**: Use `macgpu serve` to feed real-time GPU metrics into a Prometheus/Grafana dashboard for monitoring a remote Mac workstation.
-- **Metal App Debugging**: Drill down to the `queue` level to see how different command buffers in your application are distributed across the GPU.
+- **Metal App Debugging**: Drill down to the `queue` level to see how your application's command queues are distributed across the GPU.
 
 `macgpu` reads the GPU driver's per-client counters, kernel resource
 coalitions, IOReport, and the SMC directly. The sampling path needs no sudo,
 spawns no subprocesses, and does not open a Metal device, so it never shows up
 as a GPU client itself. `macgpu doctor --load` is the one exception: with sudo
 credentials already cached, it also runs `sudo -n powermetrics` as a
-cross-check, and never prompts for a password. A full sample of every source
-takes about 5 ms of CPU; the interactive view at a 1 s interval uses about 0.6%
+cross-check, and never prompts for a password. Measured on an M4 Max, a full
+sample of every source takes about 5 ms of CPU; the interactive view at a 1 s interval uses about 0.6%
 of one core.
 
 ## Quick start
@@ -44,9 +44,9 @@ macgpu --json          # one JSON report
 macgpu doctor          # check which data sources work on this machine
 ```
 
-On a terminal, bare `macgpu` opens the interactive view. When output is piped,
-or with `--once`, `--watch`, `--count`, or `--json`, it prints a table or JSON
-instead.
+On a terminal, bare `macgpu` opens the interactive view. When output or input
+is piped, or with `--once`, `--watch`, `--count`, `--json`, or
+`--exit-on-alert`, it prints a table or JSON instead.
 
 ## Install
 
@@ -54,12 +54,11 @@ instead.
 cargo install --git https://github.com/thesurlydev/macgpu
 ```
 
-Tagged releases also include a prebuilt `macgpu-macos-arm64.tar.gz` for Apple
-Silicon, with a matching `.sha256` checksum. To build from a checkout:
+To build from a checkout:
 
 ```sh
-cargo build --release
-mise run install   # builds the release binary, then installs it to ~/.local/bin
+cargo build --release   # the binary is target/release/macgpu
+mise run install        # or: build it and install it to ~/.local/bin
 ```
 
 ## Requirements
@@ -68,7 +67,7 @@ mise run install   # builds the release binary, then installs it to ~/.local/bin
   other chips are not verified.
 - The readers use private IOReport, SMC, and kernel coalition interfaces that
   Apple does not document, so an OS or chip change can affect them.
-- Rust 1.99.1 or newer to build (edition 2024).
+- Rust 1.88 or newer to build (edition 2024).
 
 ## What it shows
 
@@ -110,12 +109,12 @@ Rows:
 |---|---|
 | `GPU ms/s` | The process's share of GPU busy time, in milliseconds per second. See "What GPU ms/s means" below. |
 | `SHARE` | Percentage of all attributed GPU time in the window. Sums to 100%. |
-| `DEV%` | GPU ms/s as a share of the window, scaled to the device's active time. |
+| `DEV%` | `SHARE` times the GPU's active %, so rows sum to the device's active time. Needs IOReport. |
 | `POWER` | App rows: measured GPU energy of the app's coalition, scaled so apps sum to device power. Process rows (`~POWER`): the app's power split by GPU time, an estimate. |
 | `GPU MEM` | Graphics memory footprint (the `graphics` ledger). `-` for other users' processes, which need root. |
-| `QUEUES` | Metal command queues with GPU time. |
+| `QUEUES` | Metal command queues the process or client holds. App rows show `PROCS` instead: the number of GPU processes in the app. |
 | `LAST` | Time since the last command buffer was submitted. |
-| `EXITED` | App rows: GPU time of member processes that exited during the window. |
+| `EXITED` | App rows: GPU time of member processes that exited during the window. `-` when overlapping GPU work makes it impossible to separate; the app total is then a lower bound. |
 | `LIFETIME` | With `--all`: total GPU time since the client was created. |
 
 ### Grouping
@@ -166,18 +165,18 @@ terminals down to 60x16.
 
 | Key | Action |
 |---|---|
-| `q`, `Ctrl-C` | Quit |
+| `q`, `Ctrl-C`, `Ctrl-Q` | Quit |
 | `?`, `F1` | Help, including what every metric means |
 | arrows, `PgUp`, `PgDn`, `Home`, `End` | Move the selection |
 | `Enter` | Detail for the selected process, app, or the unattributed row; `Esc` goes back |
-| `/` | Filter (the `--filter` syntax); `Esc` clears it |
+| `/` | Filter (the `--filter` syntax); `Enter` applies it and `Esc` cancels the edit. On the main screen, `Esc` clears an applied filter |
 | `s` `.` `>`, `,` `<` | Next, previous sort column |
 | `S`, `r` | Reverse the sort |
 | `g`, `G` | Next, previous grouping level |
 | `t` | Tree view: apps over processes, processes over clients and queues |
 | `f`, space | Freeze the display; samples are buffered and applied on resume |
 | `z`, `Z` | History span: 1m, 5m, 15m, 30m, 1h |
-| `+`, `-` | Sampling interval, 100 ms to 60 s |
+| `+`, `-` (also `=`, `_`) | Sampling interval, 100 ms to 60 s; live view only |
 | `a` | Include idle clients |
 | `k` | Send a signal to the selected process, after confirmation |
 
@@ -197,14 +196,14 @@ PID is never signaled.
 | `-n, --top <N>` | Show the top N active rows. Default 15; 0 shows all. |
 | `-a, --all` | Include idle processes and add a lifetime column. Ignores `--top`. |
 | `-v, --verbose` | Show full executable paths. |
-| `-j, --json` | Emit JSON; one object per line with `--watch` or `--count`. |
+| `-j, --json` | Emit JSON: one pretty-printed object for a single sample, otherwise one compact object per line. |
 | `-g, --group <LEVEL>` | `queue`, `client`, `process`, or `app`. |
 | `-f, --filter <EXPR>` | Comma-separated substrings of name, path, or PID; prefix `!` to exclude. Example: `"chrome, !helper"`. |
 | `-p, --pid <PID>` | Only these PIDs, repeatable or comma-separated. |
 | `--disable <SOURCE>` | Turn off `power`, `apps`, `memory`, `temperature`, or `system`. |
 | `--readonly` | Disable sending signals in the interactive view. |
 | `--alert <RULE>` | Repeatable alert rule; see "Alerts" below. |
-| `--exit-on-alert` | Exit with status 3 when an alert fires (printed and log modes). |
+| `--exit-on-alert` | Exit with status 3 when an alert fires (printed, `log`, and `replay` modes; `top` rejects it). |
 | `-h`, `-V` | Help and version. |
 
 The JSON schema carries a `schema_version`, every device and row field above,
@@ -224,11 +223,13 @@ Each subcommand has more flags than the shared ones above. `macgpu <subcommand>
 | `replay` | `--speed <SPEED>`, `--fast`, `--print`, `-j, --json`, `-g, --group`, `-f, --filter`, `-p, --pid`, `-n, --top` (default 15), `-a, --all`, `-v, --verbose`, `--alert`, `--exit-on-alert` |
 | `run` | `-i, --interval <SECONDS>` (default 0.1), `-j, --json` (on stderr), `-o, --output <FILE>`, `-q, --quiet` |
 | `doctor` | `--load`, `--load-seconds <SECONDS>` (default 3), `-j, --json` |
-| `top` | The shared sampling and selection flags, plus `--all`, `--readonly`, and the alert flags |
+| `top` | The shared sampling and selection flags, plus `--all`, `--readonly`, and `--alert` (`--exit-on-alert` is rejected) |
 
-All live-sampling commands accept `-i, --interval <SECONDS>` and
-`--disable <SOURCE>`. Most also accept `-g, --group`, `-f, --filter`, and
-`-p, --pid`; `serve` has `--filter` and its own `--series` instead.
+`-i, --interval <SECONDS>` and `--disable <SOURCE>` are accepted by the default
+view, `top`, `log`, `serve`, `record`, and `run`. `-g, --group`, `-f, --filter`,
+and `-p, --pid` are accepted by the default view, `top`, `log`, and `replay`;
+`serve` has `--filter` and `--series` instead, and `record` and `run` have none
+of them.
 
 ### `log`: one line per row per sample
 
@@ -255,8 +256,8 @@ Endpoints: `/metrics` (Prometheus text format), `/report.json` (the latest
 report), and `/healthz` (200 when samples are fresh, 503 otherwise). Process
 series carry `pid`, `process`, `app`, and `coalition` labels; app series carry
 `app` and `coalition`. Only processes and apps that used the GPU since the
-exporter started are exported; `--all` includes idle ones and `--top` caps how
-many series are exported, so label cardinality stays bounded.
+exporter started are exported; `--all` includes idle ones. `--top` caps how many
+series are exported (default: no cap); use it to bound label cardinality.
 
 ### `record` and `replay`
 
@@ -280,8 +281,10 @@ macgpu run --json -o gpu.json -- ./benchmark
 
 Runs the command and reports its GPU time, energy, peak GPU memory, share of
 the device, and time under a limiter. The summary goes to stderr; the
-command's stdout is untouched. `macgpu` exits with the command's status and
-forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT to it.
+command's stdout is untouched. `macgpu` exits with the command's status (128
+plus the signal number if a signal killed it; 127 if the command was not found,
+126 if it could not be run) and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT to
+it.
 
 The command runs in the terminal's app coalition (creating a separate
 coalition needs privileges), so its energy is the app's measured GPU energy
@@ -301,6 +304,7 @@ process (length set by `--load-seconds`, default 3) and checks per-process,
 per-app, power, memory, frequency, and temperature readings against it. If
 sudo credentials are already cached, it also uses `sudo -n powermetrics` to
 cross-check residency, power, and clocks; it never prompts for a password.
+`doctor` exits with status 1 when a check fails.
 
 ## Alerts
 
@@ -323,7 +327,8 @@ status 3.
 
 ## Data sources
 
-Every source works without root.
+No source needs root to run. Graphics memory is partial without it: other
+users' processes cannot be read.
 
 | Source | Provides | Notes |
 |---|---|---|
@@ -334,7 +339,8 @@ Every source works without root.
 | SMC | GPU temperature sensors | |
 | sysctl and notify | Thermal pressure, memory pressure, GPU wired-memory limit | |
 
-`macgpu doctor` shows the state of each source on the current machine.
+Timings in this table are from an M4 Max. `macgpu doctor` shows the state of each
+source on the current machine.
 
 IOReport channel metadata is read from each sample because subscriptions can
 drop or reorder channels, and coalition time and energy come from undocumented
@@ -349,16 +355,19 @@ a new chip or macOS release may need new source checks.
 - **Exited processes.** A process's per-queue counters disappear when it
   exits, so time it used between the last sample and its exit is not in its
   own row. At app level, the coalition still counts it, and `macgpu` shows it
-  as `EXITED` time. Short-lived processes are best measured with `macgpu run`,
-  which samples every 100 ms.
+  as `EXITED` time. Where overlapping GPU work makes that time impossible to
+  separate, `EXITED` shows `-` and the app total is a lower bound. Short-lived
+  processes are best measured with `macgpu run`, which samples every 100 ms.
 - **Very short command buffers** (under about 1 ms) read about 60-100 µs high
   each.
 - **App power lags real power** by about a second after a load starts or
-  stops, because coalition energy is updated late. The kernel also updates it
-  only every 0.5 s, so windows shorter than 0.9 s split the GPU's power by the
-  apps' coalition energy over the last 0.9 s. At any interval the apps' power
-  sums to the GPU's power in every window in which an app used the GPU, and
-  totals over a run match IOReport within 0.1%.
+  stops, because coalition energy is updated late. The kernel updates it only
+  every 0.5 s, so windows shorter than 0.9 s split the GPU's power by the apps'
+  coalition energy over the last 0.9 s. When IOReport reports GPU power, the
+  apps' power is scaled to sum to it, and the coalition energies decide only
+  the split. In a test with overlapping loads, summed app energy matched
+  IOReport's GPU energy within 0.1% over a run and within 1-12% per steady 1 s
+  window; single windows during load ramps can be off by much more.
 - **Graphics memory** of other users' processes needs root.
 - **GPU temperature gaps.** While the GPU idles, its sensors sometimes stop
   reporting for about a second and read placeholder values near 0 C. Those
@@ -370,6 +379,12 @@ a new chip or macOS release may need new source checks.
 - **One GPU.** Accelerators are aggregated.
 
 ## Development
+
+```sh
+mise run gate   # fmt, clippy, the Linux schema check for macgpu-model, and tests
+```
+
+or the pieces by hand:
 
 ```sh
 cargo fmt --all
@@ -391,10 +406,10 @@ platform.
 
 The hardware end-to-end tests in `tests/` generate real GPU load through the
 hidden `macgpu __load` subcommand and check readings against invariants that
-hold even when other work shares the GPU. They take about a minute. Tests that
+hold even when other work shares the GPU. On an M4 Max they take about a minute. Tests that
 need real GPU hardware or a visible GPU client are marked `#[ignore]`, because
-CI runs on macOS virtual machines that have no IOReport power, SMC sensors, or
-visible GPU clients. The default test suite covers the CLI paths without
+macOS virtual machines have no IOReport power, SMC sensors, or visible GPU
+clients. The default test suite covers the CLI paths without
 loading the GPU. On an Apple Silicon Mac, run the ignored tests too:
 
 ```sh

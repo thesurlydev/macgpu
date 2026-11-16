@@ -168,7 +168,7 @@ fn within_bounds(label: &str, report: &Report, pid: i32, truth: &LoadResult) -> 
 /// over one window spanning the whole load, matches the load's own timing as
 /// far as other GPU work allows.
 #[test]
-#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
+#[ignore = "needs visible GPU clients and a Metal load; not available on virtual machines"]
 fn per_process_gpu_time_matches_load_measurement() {
     let _lock = gpu_lock();
     let config = LoadConfig {
@@ -251,7 +251,7 @@ fn per_process_gpu_time_matches_load_measurement() {
 /// whole window, but `AppUsage` splits the GPU between them, so the sum over
 /// every process stays within one GPU.
 #[test]
-#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
+#[ignore = "needs visible GPU clients and a Metal load; not available on virtual machines"]
 fn concurrent_loads_share_one_gpu() {
     let _lock = gpu_lock();
     let config = LoadConfig {
@@ -323,7 +323,7 @@ fn concurrent_loads_share_one_gpu() {
 /// [`UNCONTENDED_SHARE`] of the GPU; beyond that each duty is checked against
 /// the contention floor instead.
 #[test]
-#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
+#[ignore = "needs visible GPU clients and a Metal load; not available on virtual machines"]
 fn load_share_scales_with_duty_cycle() {
     let _lock = gpu_lock();
     // The previous quiet step's duty and rate.
@@ -412,7 +412,7 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 /// lifetime; the queue-aligned diff never credits more than is possible and
 /// its total tracks the load's own measurement.
 #[test]
-#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
+#[ignore = "needs visible GPU clients and a Metal load; not available on virtual machines"]
 fn queue_churn_never_over_credits() {
     let _lock = gpu_lock();
     const QUEUES: usize = 2;
@@ -572,7 +572,7 @@ fn queue_churn_never_over_credits() {
 
 /// The observing macgpu process must not become a GPU client itself.
 #[test]
-#[ignore = "needs visible GPU clients; not available on CI VMs"]
+#[ignore = "needs visible GPU clients; not available on virtual machines"]
 fn observer_holds_no_gpu_client() {
     let mut child = Command::new(MACGPU)
         .args(["--json", "--count", "3", "--interval", "0.5"])
@@ -598,7 +598,7 @@ fn observer_holds_no_gpu_client() {
 }
 
 #[test]
-#[ignore = "needs real GPU, IOReport and SMC sources; not available on CI VMs"]
+#[ignore = "needs real GPU, IOReport and SMC sources; not available on virtual machines"]
 fn doctor_json_reports_every_source() {
     let output = Command::new(MACGPU)
         .args(["doctor", "--json"])
@@ -641,7 +641,7 @@ fn doctor_json_reports_every_source() {
 /// available are skipped, so this holds before and after every reader lands;
 /// once they do, it verifies power, coalitions, and memory too.
 #[test]
-#[ignore = "needs real GPU hardware and a Metal load; not available on CI VMs"]
+#[ignore = "needs real GPU hardware and a Metal load; not available on virtual machines"]
 fn doctor_load_passes() {
     let _lock = gpu_lock();
     let output = Command::new(MACGPU)

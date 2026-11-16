@@ -1,8 +1,0 @@
-description = """
-Compare models on the same tasks: pass rate, speed, and energy per token.
-One variant per --model given, or every chat model the server lists.
-Example: ./lab.py run models --model qwen3:8b --model qwen3.8:27b-mlx
-"""
-tasks = ["explain-function", "fix-bug", "fix-noisy-test"]
-repeats = 2
-variants_from = "models"

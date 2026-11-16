@@ -1,9 +1,0 @@
-description = """
-Every task with h1's defaults. Run it first, and again after changing h1, the
-model, or the server, to see pass rate, tokens, and GPU energy per task.
-"""
-tasks = ["explain-function", "explain-stdin", "fix-bug", "fix-noisy-test"]
-repeats = 3
-
-[[variant]]
-name = "default"

@@ -1,5 +1,0 @@
-description = "Answer a question about code piped on stdin, no tools needed (works with --no-tools)"
-prompt = "The file below is m.py. What does the function `add` actually return? Answer in one sentence without using any tools."
-stdin = "m.py"
-check = "grep -qiE 'subtract|difference|a ?- ?b|minus' \"$H1_OUTPUT\""
-timeout = 600

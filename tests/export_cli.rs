@@ -53,7 +53,7 @@ fn csv_cells(line: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "needs visible GPU clients; not available on CI VMs"]
+#[ignore = "needs visible GPU clients; not available on virtual machines"]
 fn log_text_lines_parse() {
     let output = run(&["log", "-c", "3", "-i", "0.2", "--time", "unix", "-a"]);
     assert!(output.status.success(), "{}", stderr(&output));
@@ -109,7 +109,7 @@ fn log_text_lines_parse() {
 }
 
 #[test]
-#[ignore = "needs visible GPU clients; not available on CI VMs"]
+#[ignore = "needs visible GPU clients; not available on virtual machines"]
 fn log_csv_columns_are_consistent_and_append_skips_header() {
     let dir = scratch("log-csv");
     let path = dir.join("gpu.csv");
@@ -372,7 +372,7 @@ fn parse_metrics(text: &str) -> Vec<Sample> {
 }
 
 #[test]
-#[ignore = "needs visible GPU clients for process series; not available on CI VMs"]
+#[ignore = "needs visible GPU clients for process series; not available on virtual machines"]
 fn serve_exposes_metrics_report_and_health() {
     let (mut server, port) = start_server(&["--all"]);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -577,7 +577,7 @@ fn run_writes_json_and_forwards_sigterm() {
 
 /// Measures a real Metal workload: `macgpu __load` run under `macgpu run`.
 #[test]
-#[ignore = "needs a real GPU and a visible Metal load; not available on CI VMs"]
+#[ignore = "needs a real GPU and a visible Metal load; not available on virtual machines"]
 fn run_measures_gpu_time_of_a_metal_load() {
     let load = env!("CARGO_BIN_EXE_macgpu");
     let output = run(&[

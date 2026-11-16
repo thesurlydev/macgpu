@@ -7,7 +7,7 @@ edition = "2024"
 publish = false
 license = "MIT"
 repository = "https://github.com/thesurlydev/macgpu"
-rust-version = "1.99.1"
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 name = "macgpu"
 version.workspace = true
 edition.workspace = true
-description = "Per-process and per-app GPU usage, power, and memory for Apple Silicon Macs"
+description = "Apple Silicon GPU monitor with per-process and per-app usage, power attribution, memory, thermals, and Prometheus export"
 license.workspace = true
 repository.workspace = true
 categories = ["cli", "system", "monitoring"]
