@@ -1,6 +1,7 @@
 //! The detail screen for one process, app, or the unattributed row: identity,
 //! current numbers, history charts, and a per-client, per-queue, or per-member
 //! breakdown.
+use super::fmt;
 
 use super::app::{App, Detail, span_label};
 use super::charts::{self, BrailleSeries};
@@ -61,7 +62,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, detail: &Detail) {
         .title(
             Line::from(Span::styled(
                 format!(
-                    " history last {} · Esc back ",
+                    " history last {} · Esc/Backspace/Left back ",
                     span_label(app.zoom_span_ms())
                 ),
                 style::dim(),
@@ -156,27 +157,34 @@ fn process_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
         ))];
     };
     let mut lines = Vec::new();
+    lines.push(process_now(report, process));
+    lines.push(process_activity(process));
+    lines.extend(process_identity(report, detail, process));
+    lines
+}
+
+fn process_now(report: &Report, process: &ProcessView) -> Line<'static> {
     let mut now = vec![field("now")];
     now.push(Span::styled(
-        format!("{} ms/s", style::ms(process.busy_ms_per_s)),
+        format!("{} ms/s", fmt::ms(process.busy_ms_per_s)),
         style::strong(GPU),
     ));
     now.push(sep());
     now.push(Span::styled(
-        format!("share {}", style::pct(process.share_pct)),
+        format!("share {}", fmt::pct(process.share_pct)),
         style::label(),
     ));
     if let Some(device) = process.device_pct {
         now.push(sep());
         now.push(Span::styled(
-            format!("dev {}", style::pct(device)),
+            format!("dev {}", fmt::pct(device)),
             style::label(),
         ));
     }
     if let Some(power) = process.est_power_w {
         now.push(sep());
         now.push(Span::styled(
-            format!("~{} W", style::watts(power)),
+            format!("~{} W", fmt::watts_digits(power)),
             style::accent(style::POWER),
         ));
         now.push(Span::styled(" estimated from app energy", style::dim()));
@@ -192,8 +200,10 @@ fn process_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
             style::dim(),
         )),
     }
-    lines.push(Line::from(now));
+    Line::from(now)
+}
 
+fn process_activity(process: &ProcessView) -> Line<'static> {
     let mut state = vec![field("activity")];
     state.extend(activity_text(process.activity, process.last_submit_age_ms));
     state.push(sep());
@@ -207,8 +217,11 @@ fn process_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
         ),
         style::label(),
     ));
-    lines.push(Line::from(state));
+    Line::from(state)
+}
 
+fn process_identity(report: &Report, detail: &Detail, process: &ProcessView) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     if let Some(path) = &process.path {
         lines.push(Line::from(vec![
             field("path"),
@@ -263,12 +276,15 @@ fn process_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
         identity.push(sep());
     }
     identity.push(Span::styled(
-        format!("started {}", style::clock(started_ms)),
+        format!("started {}", fmt::clock(started_ms)),
         style::label(),
     ));
     if report.timestamp_ms > started_ms {
         identity.push(Span::styled(
-            format!(" ({} ago)", age((report.timestamp_ms - started_ms) / 1000)),
+            format!(
+                " ({} ago)",
+                fmt::process_age((report.timestamp_ms - started_ms) / 1000)
+            ),
             style::dim(),
         ));
     }
@@ -291,30 +307,37 @@ fn app_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
             style::dim(),
         ))];
     };
-    let mut lines = Vec::new();
+    let mut lines = vec![app_now(app)];
+    if let Some(energy) = app_billing(app) {
+        lines.push(energy);
+    }
+    lines.extend(app_in_flight(app));
+    lines.push(app_exited(report, app));
+    lines.extend(app_identity(report, app));
+    lines
+}
+
+fn app_now(app: &AppView) -> Line<'static> {
     let mut now = vec![
         field("now"),
         Span::styled(
-            format!("{} ms/s", style::ms(app.busy_ms_per_s)),
+            format!("{} ms/s", fmt::ms(app.busy_ms_per_s)),
             style::strong(GPU),
         ),
         sep(),
-        Span::styled(
-            format!("share {}", style::pct(app.share_pct)),
-            style::label(),
-        ),
+        Span::styled(format!("share {}", fmt::pct(app.share_pct)), style::label()),
     ];
     if let Some(device) = app.device_pct {
         now.push(sep());
         now.push(Span::styled(
-            format!("dev {}", style::pct(device)),
+            format!("dev {}", fmt::pct(device)),
             style::label(),
         ));
     }
     if let Some(power) = app.power_w {
         now.push(sep());
         now.push(Span::styled(
-            format!("{} W", style::watts(power)),
+            format!("{} W", fmt::watts_digits(power)),
             style::strong(style::POWER),
         ));
         now.push(Span::styled(" measured", style::dim()));
@@ -326,8 +349,10 @@ fn app_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
             style::accent(style::MEMORY),
         ));
     }
-    lines.push(Line::from(now));
+    Line::from(now)
+}
 
+fn app_billing(app: &AppView) -> Option<Line<'static>> {
     let mut energy = vec![field("billing")];
     let mut any = false;
     for (label, value) in [
@@ -344,7 +369,7 @@ fn app_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
             any = true;
             energy.push(Span::styled(label, style::dim()));
             energy.push(Span::styled(
-                format!("{} W", style::watts(value)),
+                format!("{} W", fmt::watts_digits(value)),
                 style::accent(style::POWER),
             ));
         }
@@ -357,31 +382,42 @@ fn app_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
         }
         any = true;
         energy.push(Span::styled(
-            format!("ANE {} ms/s, {} W", style::ms(ane), style::watts(ane_power)),
+            format!(
+                "ANE {} ms/s, {} W",
+                fmt::ms(ane),
+                fmt::watts_digits(ane_power)
+            ),
             style::label(),
         ));
     }
     if any {
-        lines.push(Line::from(energy));
+        return Some(Line::from(energy));
     }
+    None
+}
 
+fn app_in_flight(app: &AppView) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     if let Some(in_flight) = app.in_flight_ms_per_s {
         lines.push(Line::from(vec![
             field("in flight"),
-            Span::styled(format!("{} ms/s", style::ms(in_flight)), style::accent(GPU)),
+            Span::styled(format!("{} ms/s", fmt::ms(in_flight)), style::accent(GPU)),
             Span::styled(
                 "  wall time with GPU work queued; apps that overlap each count in full",
                 style::dim(),
             ),
         ]));
     }
+    lines
+}
 
+fn app_exited(report: &Report, app: &AppView) -> Line<'static> {
     let window_s = report.window_seconds.max(1e-9);
     let exited = match app.unattributed_gpu_ns {
         Some(gpu_ns) => vec![
             field("exited"),
             Span::styled(
-                format!("{} ms/s", style::ms(gpu_ns as f64 / 1e6 / window_s)),
+                format!("{} ms/s", fmt::ms(gpu_ns as f64 / 1e6 / window_s)),
                 style::label(),
             ),
             Span::styled(
@@ -398,8 +434,11 @@ fn app_info(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
             ),
         ],
     };
-    lines.push(Line::from(exited));
+    Line::from(exited)
+}
 
+fn app_identity(report: &Report, app: &AppView) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     if let Some(bundle) = &app.bundle_path {
         lines.push(Line::from(vec![
             field("bundle"),
@@ -467,26 +506,8 @@ fn memory_gap_reason(report: &Report) -> String {
     }
 }
 
-/// A process age: `42s`, `17m`, `5.2h`, `8.9d`.
-fn age(seconds: u64) -> String {
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3_599 => format!("{}m", seconds / 60),
-        3_600..=172_799 => format!("{:.1}h", seconds as f64 / 3600.0),
-        _ => format!("{:.1}d", seconds as f64 / 86_400.0),
-    }
-}
-
 fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
     if count == 1 { one } else { many }
-}
-
-/// A round chart ceiling in binary units: 20 GiB, 750 MiB.
-fn bytes_ceiling(peak: f64) -> f64 {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let unit = if peak >= GIB { GIB } else { MIB };
-    style::nice_ceiling((peak / unit).max(1.0)) * unit
 }
 
 fn joules(value: f64) -> String {
@@ -511,7 +532,7 @@ fn unattributed_info(report: &Report) -> Vec<Line<'static>> {
         .is_some_and(|unattributed| unattributed.partial);
     let mut now_line = vec![
         field("now"),
-        Span::styled(format!("{} ms/s", style::ms(now)), style::strong(GPU)),
+        Span::styled(format!("{} ms/s", fmt::ms(now)), style::strong(GPU)),
     ];
     if partial {
         now_line.push(Span::styled(
@@ -569,10 +590,10 @@ fn chart_specs(app: &App, detail: &Detail, dots: usize) -> Vec<ChartSpec> {
             .and_then(|report| report.unattributed.as_ref())
             .map(|unattributed| unattributed.busy_ms_per_s),
     };
-    let max = style::nice_ceiling(peak(&busy).max(10.0));
+    let max = fmt::nice_ceiling(peak(&busy).max(10.0));
     specs.push(ChartSpec {
         name: "GPU ms/s",
-        value: current_busy.map(style::ms).unwrap_or_else(|| "-".into()),
+        value: current_busy.map(fmt::ms).unwrap_or_else(|| "-".into()),
         color: GPU,
         values: busy,
         max,
@@ -594,13 +615,13 @@ fn chart_specs(app: &App, detail: &Detail, dots: usize) -> Vec<ChartSpec> {
         let values = app
             .history
             .row_buckets(&key, RowMetric::Power, end, span, &coverage);
-        let max = style::nice_ceiling(peak(&values).max(0.5));
+        let max = fmt::nice_ceiling(peak(&values).max(0.5));
         specs.push(ChartSpec {
             name: if estimated { "watts (est.)" } else { "watts" },
             value: format!(
                 "{}{} W",
                 if estimated { "~" } else { "" },
-                style::watts(power)
+                fmt::watts_digits(power)
             ),
             color: style::POWER,
             values,
@@ -635,14 +656,14 @@ fn chart_specs(app: &App, detail: &Detail, dots: usize) -> Vec<ChartSpec> {
             .zip(covered)
             .map(|(value, covered)| covered.and(value))
             .collect();
-        let max = bytes_ceiling(peak(&values));
+        let max = fmt::bytes_ceiling(peak(&values));
         specs.push(ChartSpec {
             name: "GPU memory",
             value: format::bytes(bytes),
             color: style::MEMORY,
             values,
             max,
-            scale: format!("scale {}", style::bytes_short(max as u64)),
+            scale: format!("scale {}", fmt::bytes_short(max as u64)),
         });
     }
     specs
@@ -716,7 +737,7 @@ fn process_breakdown(detail: &Detail) -> Vec<Line<'static>> {
             "{:<22} {:<8} {:>9} {:>9} {:>7}  {}",
             format!("client {:#x}", client.registry_id),
             "",
-            style::ms(client.busy_ms_per_s),
+            fmt::ms(client.busy_ms_per_s),
             format::seconds(client.lifetime_gpu_ns as f64 / 1e9),
             client
                 .last_submit_age_ms
@@ -755,7 +776,7 @@ fn process_breakdown(detail: &Detail) -> Vec<Line<'static>> {
                     style::dim(),
                 ),
                 Span::styled(
-                    format!("{:>9} ", style::ms(queue.busy_ms_per_s)),
+                    format!("{:>9} ", fmt::ms(queue.busy_ms_per_s)),
                     if queue.busy_ms_per_s > 0.0 {
                         style::accent(GPU)
                     } else {
@@ -809,12 +830,12 @@ fn app_breakdown(report: &Report, detail: &Detail) -> Vec<Line<'static>> {
         )));
     }
     for process in members {
-        lines.push(member_line(process, app));
+        lines.push(member_line(process));
     }
     lines
 }
 
-fn member_line(process: &ProcessView, _app: &AppView) -> Line<'static> {
+fn member_line(process: &ProcessView) -> Line<'static> {
     let dash = || "-".to_string();
     Line::from(vec![
         Span::styled(format!("{:>7}  ", process.pid), style::label()),
@@ -823,7 +844,7 @@ fn member_line(process: &ProcessView, _app: &AppView) -> Line<'static> {
             style::title(),
         ),
         Span::styled(
-            format!("{:>9} ", style::ms(process.busy_ms_per_s)),
+            format!("{:>9} ", fmt::ms(process.busy_ms_per_s)),
             if process.busy_ms_per_s > 0.0 {
                 style::accent(GPU)
             } else {
@@ -831,7 +852,7 @@ fn member_line(process: &ProcessView, _app: &AppView) -> Line<'static> {
             },
         ),
         Span::styled(
-            format!("{:>7} ", style::pct(process.share_pct)),
+            format!("{:>7} ", fmt::pct(process.share_pct)),
             style::label(),
         ),
         Span::styled(
@@ -839,7 +860,7 @@ fn member_line(process: &ProcessView, _app: &AppView) -> Line<'static> {
                 "{:>7} ",
                 process
                     .est_power_w
-                    .map(|watts| format!("~{}", style::watts(watts)))
+                    .map(|watts| format!("~{}", fmt::watts_digits(watts)))
                     .unwrap_or_else(dash)
             ),
             style::accent(style::POWER),
@@ -849,7 +870,7 @@ fn member_line(process: &ProcessView, _app: &AppView) -> Line<'static> {
                 "{:>8} ",
                 process
                     .graphics_memory_bytes
-                    .map(style::bytes_short)
+                    .map(fmt::bytes_short)
                     .unwrap_or_else(dash)
             ),
             style::accent(style::MEMORY),

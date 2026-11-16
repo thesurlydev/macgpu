@@ -2,15 +2,14 @@
 //!
 //! Every value here is readable without root and costs a few microseconds.
 //!
-//! macgpu deliberately does not create an `MTLDevice` to read
-//! `recommendedMaxWorkingSetSize`: doing so opens an `AGXDeviceUserClient` for
-//! macgpu's own PID (verified on macOS 27), so macgpu would list itself as a
-//! GPU client. The default wired limit (when `iogpu.wired_limit_mb` is 0) is
+//! Creating an `MTLDevice` to read `recommendedMaxWorkingSetSize` would open
+//! an `AGXDeviceUserClient` for macgpu's own PID, so macgpu would list itself
+//! as a GPU client. The default wired limit (when `iogpu.wired_limit_mb` is 0) is
 //! not exposed through any sysctl or registry property, so it is left unknown
 //! rather than estimated.
 
 use std::ffi::{CStr, c_char, c_int};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 unsafe extern "C" {
     fn notify_register_check(name: *const c_char, out_token: *mut c_int) -> u32;
@@ -83,15 +82,24 @@ pub fn memory_pressure_name(level: u32) -> String {
 }
 
 fn thermal_pressure_level() -> Option<u64> {
-    static TOKEN: OnceLock<Option<c_int>> = OnceLock::new();
-    let token = (*TOKEN.get_or_init(|| {
-        let mut token: c_int = 0;
-        let status =
-            unsafe { notify_register_check(THERMAL_PRESSURE_NOTIFICATION.as_ptr(), &mut token) };
-        (status == NOTIFY_STATUS_OK).then_some(token)
-    }))?;
+    static TOKEN: Mutex<Option<c_int>> = Mutex::new(None);
+    let mut token = TOKEN.lock().ok()?;
+    if token.is_none() {
+        let mut registered: c_int = 0;
+        // SAFETY: the notification name is NUL-terminated and `registered` is a valid out-parameter.
+        let status = unsafe {
+            notify_register_check(THERMAL_PRESSURE_NOTIFICATION.as_ptr(), &mut registered)
+        };
+        if status != NOTIFY_STATUS_OK {
+            // Leave the cache empty so registration is retried on the next read.
+            return None;
+        }
+        *token = Some(registered);
+    }
+    let registered = (*token).expect("registered thermal pressure token");
     let mut state = 0u64;
-    let status = unsafe { notify_get_state(token, &mut state) };
+    // SAFETY: `registered` came from `notify_register_check` and `state` is a valid out-parameter.
+    let status = unsafe { notify_get_state(registered, &mut state) };
     (status == NOTIFY_STATUS_OK).then_some(state)
 }
 
@@ -100,6 +108,7 @@ fn sysctl_u64(name: &str) -> Option<u64> {
     let name = std::ffi::CString::new(name).ok()?;
     let mut value = [0u8; 8];
     let mut size = value.len();
+    // SAFETY: `name` is NUL-terminated, `value` is writable for `size` bytes, and `size` is a valid in/out parameter.
     let result = unsafe {
         libc::sysctlbyname(
             name.as_ptr(),

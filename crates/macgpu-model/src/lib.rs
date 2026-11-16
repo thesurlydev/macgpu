@@ -144,10 +144,6 @@ pub struct DeviceMemory {
     /// sysctl is 0: the OS default applies and its value is not exposed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wired_limit_bytes: Option<u64>,
-    /// `MTLDevice.recommendedMaxWorkingSetSize`. Not filled by the sampler:
-    /// creating an `MTLDevice` would make macgpu a GPU client of its own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_working_set_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_physical_bytes: Option<u64>,
 }
@@ -182,7 +178,7 @@ pub struct Totals {
 pub enum Activity {
     /// Used the GPU inside this window.
     Active,
-    /// Submitted work within the last `RECENT_SECONDS` (see `macgpu_core::analyze`).
+    /// Submitted work within a short window after the last use (ten seconds).
     Recent,
     #[default]
     Idle,
@@ -289,9 +285,9 @@ pub struct QueueView {
 /// second, so when IOReport's GPU power is known the apps' power is scaled to
 /// sum to `device.power_w` and the coalition energies decide only the split.
 /// The kernel credits coalition energy in steps about 0.5 s apart, so a window
-/// shorter than 0.9 s is split by the coalition energy of the trailing 0.9 s
-/// of windows. The split still lags by about a second while a load ramps up or
-/// stops.
+/// shorter than the trailing energy span (just under a second) is split by the
+/// coalition energy of that span. The split still lags by about a second while
+/// a load ramps up or stops.
 ///
 /// When resource coalitions are unavailable, apps are grouped by `.app` bundle
 /// from the process rows instead: `coalition_id` is then a synthetic key (high
@@ -342,7 +338,8 @@ pub struct AppView {
     pub energy_j: Option<f64>,
     /// GPU power in the window. When IOReport's GPU power is known it is
     /// `device.power_w` split by the coalitions' `gpu_energy_nj` over the
-    /// window, or over the trailing 0.9 s for shorter windows, so the apps sum
+    /// window, or over the trailing just-under-a-second span for shorter
+    /// windows, so the apps sum
     /// to the device (by apportioned GPU time until any coalition energy has
     /// moved); otherwise the coalition's own `gpu_energy_nj` at its average
     /// rate over that span, which trails real power by about a second.
@@ -476,9 +473,12 @@ pub mod source {
 /// none of them. Observed on M4 Max, macOS 27: `PERF`, `PRFBOOST`, `DEADLINE`,
 /// and `DEADAWAR` follow demand (`PRFBOOST` at the top clock), while
 /// `FAST_DIE` coincided with a 100 C die and clocks below the maximum. Every
-/// state not listed here is treated as not limiting. A limiter state does not
-/// always lower the clock (`PWR_ZONE` has been seen at 100% at the top
-/// P-state), so report "time under a limiter state", never "throttled".
+/// state not listed here is treated as not limiting. IOReport reports state
+/// names truncated to their first eight characters, so `CLTMLIMI` is the
+/// thermal-limiting state and `PPMTARGE` the power-management target. A
+/// limiter state does not always lower the clock (`PWR_ZONE` has been seen at
+/// 100% at the top P-state), so report "time under a limiter state", never
+/// "throttled".
 pub const LIMITING_STATES: &[&str] = &[
     "POWER", "PWR_ZONE", "FAST_DIE", "PRFLIMIT", "PPMLIMIT", "CLTMLIMI", "PPMTARGE",
 ];
@@ -527,5 +527,39 @@ impl Report {
         self.processes
             .iter()
             .find(|process| process.pid == pid && process.start_us == start_us)
+    }
+
+    /// App with the given coalition id (or synthetic bundle key).
+    pub fn app(&self, coalition_id: u64) -> Option<&AppView> {
+        self.apps
+            .iter()
+            .find(|app| app.coalition_id == coalition_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_app_by_coalition_id() {
+        let report = Report {
+            apps: vec![
+                AppView {
+                    coalition_id: 100,
+                    name: "First".into(),
+                    ..AppView::default()
+                },
+                AppView {
+                    coalition_id: 395,
+                    name: "Second".into(),
+                    ..AppView::default()
+                },
+            ],
+            ..Report::default()
+        };
+        assert_eq!(report.app(100).map(|app| app.name.as_str()), Some("First"));
+        assert_eq!(report.app(395).map(|app| app.name.as_str()), Some("Second"));
+        assert!(report.app(7).is_none());
     }
 }

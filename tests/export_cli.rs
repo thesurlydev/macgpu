@@ -53,7 +53,7 @@ fn csv_cells(line: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients; not available on CI VMs"]
 fn log_text_lines_parse() {
     let output = run(&["log", "-c", "3", "-i", "0.2", "--time", "unix", "-a"]);
     assert!(output.status.success(), "{}", stderr(&output));
@@ -109,7 +109,7 @@ fn log_text_lines_parse() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients; not available on CI VMs"]
 fn log_csv_columns_are_consistent_and_append_skips_header() {
     let dir = scratch("log-csv");
     let path = dir.join("gpu.csv");
@@ -372,7 +372,7 @@ fn parse_metrics(text: &str) -> Vec<Sample> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients for process series; not available on CI VMs"]
 fn serve_exposes_metrics_report_and_health() {
     let (mut server, port) = start_server(&["--all"]);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -386,10 +386,23 @@ fn serve_exposes_metrics_report_and_health() {
         assert!(Instant::now() < deadline, "never healthy: {body}");
         thread::sleep(Duration::from_millis(100));
     }
-    // Let counters advance over a few samples.
-    thread::sleep(Duration::from_millis(600));
-
-    let (status, headers, body) = http_get(port, "/metrics");
+    // Wait for the exporter to count samples, rather than guessing at a delay.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (status, headers, body) = loop {
+        let (status, headers, body) = http_get(port, "/metrics");
+        let samples = parse_metrics(&body);
+        if samples
+            .iter()
+            .any(|(name, _, value)| name == "macgpu_exporter_samples_total" && *value >= 3.0)
+        {
+            break (status, headers, body);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exporter never counted 3 samples: {body}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
     assert_eq!(status, 200);
     assert!(headers["content-type"].starts_with("text/plain; version=0.0.4"));
     let samples = parse_metrics(&body);
@@ -548,9 +561,9 @@ fn run_writes_json_and_forwards_sigterm() {
         .spawn()
         .unwrap();
     // macgpu installs its handlers before spawning the command, so once the
-    // command exists the signal is forwarded rather than fatal.
+    // command exists the signal is forwarded rather than fatal. No fixed delay
+    // after the poll is needed.
     wait_for_child_named(child.id(), "sleep", Duration::from_secs(30));
-    thread::sleep(Duration::from_millis(600));
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let status = wait_timeout(&mut child, Duration::from_secs(5)).expect("forwarded SIGTERM");
     assert_eq!(status.code(), Some(128 + libc::SIGTERM));
@@ -558,13 +571,13 @@ fn run_writes_json_and_forwards_sigterm() {
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(summary["signal"], libc::SIGTERM);
     assert_eq!(summary["command"][0], "/bin/sleep");
-    assert!(summary["wall_seconds"].as_f64().unwrap() > 0.5);
+    assert!(summary["wall_seconds"].as_f64().unwrap() > 0.0);
     assert_eq!(summary["gpu_seconds"], 0.0);
 }
 
 /// Measures a real Metal workload: `macgpu __load` run under `macgpu run`.
 #[test]
-#[ignore]
+#[ignore = "needs a real GPU and a visible Metal load; not available on CI VMs"]
 fn run_measures_gpu_time_of_a_metal_load() {
     let load = env!("CARGO_BIN_EXE_macgpu");
     let output = run(&[

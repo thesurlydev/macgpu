@@ -1,4 +1,5 @@
 //! The history panel: the "who used the GPU" stack and the device line charts.
+use super::fmt;
 
 use super::app::{App, span_label};
 use super::charts::{self, BrailleSeries};
@@ -16,13 +17,20 @@ use std::collections::HashMap;
 
 /// The "who used the GPU" series: the top apps (or processes, without
 /// coalition data) by average use over the visible span.
+pub struct WhoSeries {
+    pub key: RowKey,
+    pub name: String,
+    pub color: Color,
+    pub average: f64,
+}
+
 pub struct WhoChart {
     /// Stack device % (rows sum to the device's active %) when the device's
     /// active % is known, otherwise GPU ms/s.
     pub metric: RowMetric,
     pub level_label: &'static str,
-    /// `(key, name, color, average over the span)`, largest first.
-    pub series: Vec<(RowKey, String, Color, f64)>,
+    /// Largest average first.
+    pub series: Vec<WhoSeries>,
     /// Every other row of the same level.
     pub others: Vec<RowKey>,
 }
@@ -79,9 +87,12 @@ impl WhoChart {
         }
         for (index, (key, name, average)) in ranked.into_iter().enumerate() {
             if index < style::SERIES.len() {
-                chart
-                    .series
-                    .push((key, name, style::SERIES[index], average));
+                chart.series.push(WhoSeries {
+                    key,
+                    name,
+                    color: style::SERIES[index],
+                    average,
+                });
             } else {
                 chart.others.push(key);
             }
@@ -92,8 +103,8 @@ impl WhoChart {
     pub fn color_of(&self, key: &RowKey) -> Option<Color> {
         self.series
             .iter()
-            .find(|(series_key, ..)| series_key == key)
-            .map(|(_, _, color, _)| *color)
+            .find(|series| series.key == *key)
+            .map(|series| series.color)
     }
 
     fn unit(&self) -> &'static str {
@@ -115,16 +126,21 @@ impl WhoChart {
             .series
             .iter()
             .take(series_count)
-            .map(|(key, _, color, _)| {
+            .map(|series| {
                 (
-                    *color,
+                    series.color,
                     app.history
-                        .row_buckets(key, self.metric, end, span, &coverage),
+                        .row_buckets(&series.key, self.metric, end, span, &coverage),
                 )
             })
             .collect();
         let mut rest: Vec<RowKey> = self.others.clone();
-        rest.extend(self.series.iter().skip(series_count).map(|(key, ..)| *key));
+        rest.extend(
+            self.series
+                .iter()
+                .skip(series_count)
+                .map(|series| series.key),
+        );
         if !rest.is_empty() {
             let mut other = vec![None; buckets];
             for key in &rest {
@@ -148,8 +164,8 @@ impl WhoChart {
             })
             .fold(0.0, f64::max);
         let max = match self.metric {
-            RowMetric::DevicePct => style::nice_ceiling(peak.max(5.0)).min(100.0),
-            _ => style::nice_ceiling(peak.max(50.0)),
+            RowMetric::DevicePct => fmt::nice_ceiling(peak.max(5.0)).min(100.0),
+            _ => fmt::nice_ceiling(peak.max(50.0)),
         };
         charts::stacked(buffer, area, &layers, max);
         max
@@ -259,19 +275,25 @@ fn draw_who(buffer: &mut Buffer, area: Rect, app: &App, who: &WhoChart, roomy: b
     }
     let value = |value: f64| match who.metric {
         RowMetric::DevicePct => format!("{value:>5.1}%"),
-        _ => format!("{:>6}", style::ms(value)),
+        _ => format!("{:>6}", fmt::ms(value)),
     };
     let shown = series_count.saturating_sub(1).max(1);
     if side_legend {
         let x = area.x + area.width - legend_width + 1;
-        for (row, (_, name, color, average)) in who.series.iter().take(shown).enumerate() {
+        for (row, series) in who.series.iter().take(shown).enumerate() {
             let line = Line::from(vec![
-                Span::styled("■ ", style::accent(*color)),
-                Span::styled(format::truncate(name, 15), style::label()),
+                Span::styled("■ ", style::accent(series.color)),
+                Span::styled(format::truncate(&series.name, 15), style::label()),
             ]);
             let y = area.y + 1 + row as u16;
             buffer.set_line(x, y, &line, legend_width - 8);
-            buffer.set_stringn(x + legend_width - 8, y, value(*average), 7, style::label());
+            buffer.set_stringn(
+                x + legend_width - 8,
+                y,
+                value(series.average),
+                7,
+                style::label(),
+            );
         }
         let others = who.series.len().saturating_sub(shown) + who.others.len();
         if others > 0 && (shown as u16) + 1 < area.height {
@@ -291,10 +313,14 @@ fn draw_who(buffer: &mut Buffer, area: Rect, app: &App, who: &WhoChart, roomy: b
         );
     } else {
         let mut spans = Vec::new();
-        for (_, name, color, average) in who.series.iter().take(shown) {
-            spans.push(Span::styled("■", style::accent(*color)));
+        for series in who.series.iter().take(shown) {
+            spans.push(Span::styled("■", style::accent(series.color)));
             spans.push(Span::styled(
-                format!("{} {} ", format::truncate(name, 12), value(*average).trim()),
+                format!(
+                    "{} {} ",
+                    format::truncate(&series.name, 12),
+                    value(series.average).trim()
+                ),
                 style::label(),
             ));
         }
@@ -358,10 +384,10 @@ fn draw_device_charts(buffer: &mut Buffer, area: Rect, app: &App) {
             .then(|| (style::NORMALIZED, series(|point| point.normalized_pct)));
         charts.push(MetricChart {
             name: "active",
-            value: device.active_pct.map(style::pct).unwrap_or_default(),
+            value: device.active_pct.map(fmt::pct).unwrap_or_default(),
             note: device
                 .freq_normalized_pct
-                .map(|value| format!("norm {}", style::pct(value)))
+                .map(|value| format!("norm {}", fmt::pct(value)))
                 .unwrap_or_default(),
             color: GPU,
             values: series(|point| point.active_pct),
@@ -370,10 +396,10 @@ fn draw_device_charts(buffer: &mut Buffer, area: Rect, app: &App) {
         });
     } else {
         let values = series(|point| Some(point.attributed_ms_per_s));
-        let max = style::nice_ceiling(peak(&values).max(100.0));
+        let max = fmt::nice_ceiling(peak(&values).max(100.0));
         charts.push(MetricChart {
             name: "GPU ms/s",
-            value: style::ms(report.totals.attributed_ms_per_s),
+            value: fmt::ms(report.totals.attributed_ms_per_s),
             note: format!("scale {max:.0}"),
             color: GPU,
             values,
@@ -383,7 +409,7 @@ fn draw_device_charts(buffer: &mut Buffer, area: Rect, app: &App) {
     }
     if let Some(power) = device.power_w {
         let values = series(|point| point.power_w);
-        let max = style::nice_ceiling(peak(&values).max(1.0));
+        let max = fmt::nice_ceiling(peak(&values).max(1.0));
         charts.push(MetricChart {
             name: "power",
             value: format::watts(power),
@@ -398,7 +424,7 @@ fn draw_device_charts(buffer: &mut Buffer, area: Rect, app: &App) {
         let values = series(|point| point.mhz);
         let max = device
             .max_mhz
-            .unwrap_or_else(|| style::nice_ceiling(peak(&values).max(100.0)));
+            .unwrap_or_else(|| fmt::nice_ceiling(peak(&values).max(100.0)));
         charts.push(MetricChart {
             name: "clock",
             value: format!("{mhz:.0} MHz"),

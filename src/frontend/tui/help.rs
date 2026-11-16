@@ -1,54 +1,99 @@
 //! The `?` overlay: every key, and what every number means.
 
+use super::app::{ZOOM_SPANS_S, span_label};
 use super::style::{self, GPU};
+use crate::analyze::RECENT_SECONDS;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 
-const KEYS: &[(&str, &str)] = &[
-    ("q  Ctrl-C", "quit"),
-    ("?  F1", "this help (Esc closes)"),
-    (
-        "↑ ↓ PgUp PgDn Home End",
-        "move the selection; mouse click selects, wheel scrolls",
-    ),
-    (
-        "Enter  double-click",
-        "detail screen for the selected row; Esc goes back",
-    ),
-    (
-        "/",
-        "filter: comma-separated name, path or PID substrings; !term excludes (chrome, !helper)",
-    ),
-    ("Esc", "clear the filter"),
-    (
-        "s  .  >",
-        "next sort column (click a column header to sort by it)",
-    ),
-    (",  <", "previous sort column"),
-    ("S  r", "reverse the sort"),
-    (
-        "g  G",
-        "group by queue, client, process, or app (next, previous)",
-    ),
-    (
-        "t",
-        "tree: processes under their app, or clients and queues under their process",
-    ),
-    (
-        "f  space",
-        "freeze the display; samples are kept and applied when you resume",
-    ),
-    ("z  Z", "history span: 1m, 5m, 15m, 30m, 1h"),
-    ("+  -", "sampling interval longer or shorter (live only)"),
-    ("a", "show or hide GPU clients that were idle in the window"),
-    (
-        "k",
-        "send a signal to the selected process (asks first; off with --readonly)",
-    ),
-];
+/// Every key the handlers accept, with the screen or prompt it acts on.
+fn keys() -> Vec<(&'static str, String)> {
+    let spans = ZOOM_SPANS_S
+        .iter()
+        .map(|seconds| span_label(*seconds * 1000))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        (
+            "q  Ctrl-C  Ctrl-Q",
+            "quit; q works on the main screen, Ctrl-C and Ctrl-Q work everywhere".into(),
+        ),
+        ("?  F1", "this help; any key closes it".into()),
+        (
+            "↑ ↓ PgUp PgDn Home End",
+            "main: move the selection. detail/help: scroll. mouse: click selects, double-click opens detail, wheel scrolls, header click sorts"
+                .into(),
+        ),
+        (
+            "Enter",
+            "main: open detail; detail: go back; filter: apply; confirm: send".into(),
+        ),
+        (
+            "Esc",
+            "help: close; filter or confirm: cancel; detail: go back; main: clear the filter"
+                .into(),
+        ),
+        (
+            "/",
+            "filter: comma-separated name, path or PID substrings; !term excludes (chrome, !helper)"
+                .into(),
+        ),
+        (
+            "Backspace  Ctrl-U  Ctrl-W",
+            "filter: delete one character, clear the input, delete the last word".into(),
+        ),
+        (
+            "s  .  >  ,  <",
+            "next and previous sort columns (click a column header to sort by it)".into(),
+        ),
+        ("S  r", "main: reverse the sort".into()),
+        (
+            "g  G",
+            "group by queue, client, process, or app (next, previous)".into(),
+        ),
+        (
+            "t",
+            "main: tree, processes under their app, or clients and queues under their process"
+                .into(),
+        ),
+        (
+            "f  space",
+            "freeze the display; samples are kept and applied when you resume".into(),
+        ),
+        ("z  Z", format!("history span: {spans} (detail: chart span)")),
+        (
+            "+  -  =  _",
+            "sampling interval longer or shorter (live only); = and _ are aliases".into(),
+        ),
+        (
+            "a",
+            "show or hide GPU clients that were idle in the window".into(),
+        ),
+        (
+            "k",
+            "signal prompt for the selected process (off with --readonly)".into(),
+        ),
+        (
+            "← ↑ BackTab  → ↓ Tab",
+            "confirm: previous and next signal".into(),
+        ),
+        (
+            "y  n  q  9  K",
+            "confirm: send, cancel, cancel, pick SIGKILL; q is only in the prompt".into(),
+        ),
+        (
+            "detail: Backspace  ←",
+            "go back, like Esc and Enter".into(),
+        ),
+        (
+            "detail: g  G  t  s  .  ,  S  r  /",
+            "no-op; sort, group and filter apply on the main screen".into(),
+        ),
+    ]
+}
 
 const METRICS: &[(&str, &str)] = &[
     (
@@ -89,7 +134,7 @@ const METRICS: &[(&str, &str)] = &[
     ),
     (
         "LAST",
-        "time since the last submission: ● used the GPU this window, ◦ within the last 10 s, blank idle.",
+        "time since the last submission: ● used the GPU this window, ◦ within the last {RECENT_SECONDS} s, blank idle.",
     ),
     (
         "HISTORY",
@@ -116,11 +161,11 @@ pub fn lines(width: u16) -> Vec<Line<'static>> {
         "Keys",
         style::strong(GPU).add_modifier(Modifier::UNDERLINED),
     ))];
-    for (key, text) in KEYS {
+    for (key, text) in keys() {
         push_wrapped(
             &mut lines,
             Span::styled(format!("  {key:<24}"), style::accent(GPU)),
-            text,
+            &text,
             width,
         );
     }
@@ -130,10 +175,11 @@ pub fn lines(width: u16) -> Vec<Line<'static>> {
         style::strong(GPU).add_modifier(Modifier::UNDERLINED),
     )));
     for (name, text) in METRICS {
+        let text = text.replace("{RECENT_SECONDS}", &RECENT_SECONDS.to_string());
         push_wrapped(
             &mut lines,
             Span::styled(format!("  {name:<14}"), style::title()),
-            text,
+            &text,
             width,
         );
     }
@@ -185,7 +231,13 @@ pub fn draw(frame: &mut Frame, area: Rect, scroll: u16) {
         .border_type(BorderType::Rounded)
         .border_style(style::accent(GPU))
         .title(Span::styled(" macgpu help ", style::strong(GPU)))
-        .title(Line::from(Span::styled(" ↑↓ scroll · Esc close ", style::dim())).right_aligned());
+        .title(
+            Line::from(Span::styled(
+                " ↑↓ PgUp PgDn Space scroll · any key closes ",
+                style::dim(),
+            ))
+            .right_aligned(),
+        );
     Clear.render(popup, frame.buffer_mut());
     frame.render_widget(
         Paragraph::new(lines(width.saturating_sub(2)))

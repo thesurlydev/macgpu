@@ -10,7 +10,7 @@
 use super::alerts::{AlertArgs, Alerts};
 use super::log::{parse_duration_arg, sample_limit};
 use super::signals;
-use super::table::{self, ALERT_EXIT_CODE, TableOptions};
+use super::table::{self, TableOptions, alert_exit_code, is_broken_pipe};
 use super::tui;
 use crate::cli::{SamplingArgs, SelectionArgs};
 use crate::engine::{Engine, FeedEvent, ReportFeed, clamp_interval};
@@ -20,10 +20,12 @@ use clap::Args;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Replay waits this long for a report that is due; it is a pacing bound, not a timeout on the file.
+const REPLAY_WAIT: Duration = Duration::from_secs(3600);
 
 #[derive(Args, Debug, Clone, Default)]
 #[command(after_help = "\
@@ -102,6 +104,18 @@ pub struct ReplayArgs {
     pub alerts: AlertArgs,
 }
 
+impl From<&ReplayArgs> for TableOptions {
+    fn from(args: &ReplayArgs) -> Self {
+        table::table_options(
+            args.selection.group,
+            args.selection.filter(),
+            args.top,
+            args.all,
+            args.verbose,
+        )
+    }
+}
+
 fn parse_speed(text: &str) -> Result<f64, String> {
     let speed: f64 = text
         .parse()
@@ -145,13 +159,10 @@ pub fn record(args: &RecordArgs) -> Result<i32> {
     let mut bytes = 0u64;
     let result = (|| -> io::Result<()> {
         loop {
-            if signals::take().is_some() {
-                return Ok(());
-            }
-            let mut report = match engine.recv_timeout(Duration::from_millis(200)) {
-                Ok(report) => report,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            let mut report = match signals::recv_or_stop(|timeout| engine.recv_timeout(timeout)) {
+                signals::Recv::Item(report) => report,
+                signals::Recv::Timeout => continue,
+                signals::Recv::Stop | signals::Recv::Disconnected => return Ok(()),
             };
             if !args.all {
                 prune_idle(&mut report);
@@ -169,7 +180,7 @@ pub fn record(args: &RecordArgs) -> Result<i32> {
     })();
     match result {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) if is_broken_pipe(&error) => {}
         Err(error) => return Err(error).context("failed to write the recording"),
     }
 
@@ -213,32 +224,26 @@ pub fn replay(args: &ReplayArgs) -> Result<i32> {
     let problem = feed.problem_handle();
 
     if interactive {
-        let options = tui::TuiOptions {
-            group: args.selection.group,
-            filter: args.selection.filter(),
-            include_idle: args.all,
-            readonly: true,
-            alerts: Alerts::from_args(&args.alerts)?,
-        };
+        let options = crate::cli::tui_options(
+            args.selection.group,
+            args.selection.filter(),
+            args.all,
+            true,
+            &args.alerts,
+        )?;
         tui::run(Box::new(feed), options)?;
         return finish(&problem).map(|()| 0);
     }
 
     let mut feed = feed;
     let mut alerts = Alerts::from_args(&args.alerts)?;
-    let options = TableOptions {
-        group: args.selection.group,
-        filter: args.selection.filter(),
-        top: args.top,
-        all: args.all,
-        verbose: args.verbose,
-    };
+    let options = TableOptions::from(args);
     let mut stdout = io::stdout().lock();
     let mut alert_fired = false;
     let mut first = true;
     let result = (|| -> Result<()> {
         loop {
-            let mut report = match feed.next_report(Duration::from_secs(3600)) {
+            let mut report = match feed.next_report(REPLAY_WAIT) {
                 FeedEvent::Report(report) => report,
                 FeedEvent::Timeout => continue,
                 FeedEvent::End => return Ok(()),
@@ -259,25 +264,18 @@ pub fn replay(args: &ReplayArgs) -> Result<i32> {
             }
             stdout.flush()?;
             first = false;
-            if args.alerts.exit_on_alert && alert_fired {
+            if alert_exit_code(args.alerts.exit_on_alert, alert_fired) != 0 {
                 return Ok(());
             }
         }
     })();
-    if let Err(error) = result {
-        let broken_pipe = error
-            .downcast_ref::<io::Error>()
-            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe);
-        if !broken_pipe {
-            return Err(error);
-        }
+    if let Err(error) = result
+        && !is_broken_pipe(error.as_ref())
+    {
+        return Err(error);
     }
     finish(&problem)?;
-    Ok(if args.alerts.exit_on_alert && alert_fired {
-        ALERT_EXIT_CODE
-    } else {
-        0
-    })
+    Ok(alert_exit_code(args.alerts.exit_on_alert, alert_fired))
 }
 
 /// Reports what went wrong while reading, after playback ended.

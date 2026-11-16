@@ -19,17 +19,28 @@ jobs:
         with:
           toolchain: 1.99.1
 
+      - name: Check tag matches Cargo.toml version
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)"/\1/')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package Binary
         run: |
           mkdir -p bin
-          cp target/release/macgpu bin/
-          tar -czvf macgpu-macos-arm64.tar.gz -C bin macgpu
+          cp target/release/macgpu LICENSE README.md bin/
+          tar -czvf macgpu-macos-arm64.tar.gz -C bin macgpu LICENSE README.md
+          shasum -a 256 macgpu-macos-arm64.tar.gz > macgpu-macos-arm64.tar.gz.sha256
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: macgpu-macos-arm64.tar.gz
+          files: |
+            macgpu-macos-arm64.tar.gz
+            macgpu-macos-arm64.tar.gz.sha256
           generate_release_notes: true

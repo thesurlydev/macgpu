@@ -1,7 +1,7 @@
-//! Process metadata without spawning `ps`.
+//! Process metadata read from kernel interfaces.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::io;
 use std::mem::MaybeUninit;
 
@@ -73,22 +73,19 @@ impl ProcessCache {
     }
 
     pub fn get(&mut self, pid: i32) -> Option<ProcessInfo> {
-        let start_us = start_time_us(pid);
-        if let (Some(cached), Some(start_us)) = (self.entries.get(&pid), start_us)
-            && cached.start_us == start_us
+        // `info` already reads the start time; reuse it instead of running the
+        // start-time sysctl a second time on every cache miss.
+        let Some(fresh) = info(pid) else {
+            self.entries.remove(&pid);
+            return None;
+        };
+        if let Some(cached) = self.entries.get(&pid)
+            && cached.start_us == fresh.start_us
         {
             return Some(cached.clone());
         }
-        match info(pid) {
-            Some(fresh) => {
-                self.entries.insert(pid, fresh.clone());
-                Some(fresh)
-            }
-            None => {
-                self.entries.remove(&pid);
-                None
-            }
-        }
+        self.entries.insert(pid, fresh.clone());
+        Some(fresh)
     }
 
     /// Drops entries for PIDs not in `live`.
@@ -105,6 +102,7 @@ impl ProcessCache {
 fn bsd_info(pid: i32) -> Option<(i32, u32, u64, String)> {
     let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
     let size = size_of::<libc::proc_bsdshortinfo>() as c_int;
+    // SAFETY: `info` is a zeroed, correctly sized buffer for `PROC_PIDT_SHORTBSDINFO` output.
     let written = unsafe {
         libc::proc_pidinfo(
             pid,
@@ -117,6 +115,7 @@ fn bsd_info(pid: i32) -> Option<(i32, u32, u64, String)> {
     if written != size {
         return None;
     }
+    // SAFETY: the successful call above initialized the full `proc_bsdshortinfo`.
     let info = unsafe { info.assume_init() };
     let start_us = start_time_us(pid)?;
     Some((
@@ -127,8 +126,14 @@ fn bsd_info(pid: i32) -> Option<(i32, u32, u64, String)> {
     ))
 }
 
-/// `sizeof(struct kinfo_proc)` on arm64 macOS.
+/// `sizeof(struct kinfo_proc)` on Apple Silicon.
 const KINFO_PROC_SIZE: usize = 648;
+/// Slot of `p_starttime.tv_sec` in the `kinfo_proc` buffer.
+const START_SECONDS_SLOT: usize = 0;
+/// Slot of `p_starttime.tv_usec` in the `kinfo_proc` buffer.
+const START_MICROS_SLOT: usize = 1;
+/// Mask for the 32-bit microsecond field stored in a 64-bit slot.
+const MICROS_MASK: u64 = 0xffff_ffff;
 
 /// Process start time in µs since the Unix epoch, from `sysctl(KERN_PROC_PID)`.
 ///
@@ -140,6 +145,7 @@ pub fn start_time_us(pid: i32) -> Option<u64> {
     // u64 elements keep the buffer 8-byte aligned.
     let mut buffer = [0u64; KINFO_PROC_SIZE / 8];
     let mut size = KINFO_PROC_SIZE;
+    // SAFETY: `mib` is a valid C array, `buffer` is writable for `size` bytes, and `size` is a valid out-parameter.
     let result = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
@@ -154,8 +160,8 @@ pub fn start_time_us(pid: i32) -> Option<u64> {
     if result != 0 || size != KINFO_PROC_SIZE {
         return None;
     }
-    let seconds = buffer[0];
-    let microseconds = buffer[1] & 0xffff_ffff;
+    let seconds = buffer[START_SECONDS_SLOT];
+    let microseconds = buffer[START_MICROS_SLOT] & MICROS_MASK;
     (seconds > 0).then(|| {
         seconds
             .saturating_mul(1_000_000)
@@ -164,8 +170,9 @@ pub fn start_time_us(pid: i32) -> Option<u64> {
 }
 
 /// Full executable path via `proc_pidpath`.
-pub fn executable_path(pid: i32) -> Option<String> {
+fn executable_path(pid: i32) -> Option<String> {
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buffer` is writable for its full length, which is passed as the capacity to `proc_pidpath`.
     let length = unsafe {
         libc::proc_pidpath(
             pid,
@@ -182,24 +189,32 @@ pub fn executable_path(pid: i32) -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
-/// Every PID on the system.
-pub fn all_pids() -> Vec<i32> {
+/// Every PID on the system, or an error when the kernel call fails.
+pub fn try_all_pids() -> io::Result<Vec<i32>> {
     let mut capacity = 4096usize;
     loop {
         let mut pids = vec![0i32; capacity];
         let bytes = (capacity * size_of::<i32>()) as c_int;
+        // SAFETY: `pids` is writable for `bytes` bytes, the capacity passed to `proc_listallpids`.
         let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast::<c_void>(), bytes) };
         if count < 0 {
-            return Vec::new();
+            return Err(io::Error::last_os_error());
         }
         let count = count as usize;
         if count < capacity {
             pids.truncate(count);
             pids.retain(|pid| *pid > 0);
-            return pids;
+            return Ok(pids);
         }
         capacity *= 2;
     }
+}
+
+/// Every PID on the system, empty when the listing failed.
+///
+/// Callers that must tell failure from an empty system use [`try_all_pids`].
+pub fn all_pids() -> Vec<i32> {
+    try_all_pids().unwrap_or_default()
 }
 
 /// Sends `signal` to `pid`.
@@ -207,6 +222,7 @@ pub fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
     if pid <= 0 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid pid"));
     }
+    // SAFETY: `kill` takes a pid and signal by value and needs no caller-owned pointers.
     if unsafe { libc::kill(pid, signal) } == 0 {
         Ok(())
     } else {
@@ -221,20 +237,6 @@ fn c_chars_to_string(chars: &[c_char]) -> String {
         .map(|&c| c as u8)
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// Converts a NUL-terminated C string pointer. Returns an empty string for null.
-///
-/// # Safety
-/// `pointer` must be null or point to a NUL-terminated string.
-pub unsafe fn c_str(pointer: *const c_char) -> String {
-    if pointer.is_null() {
-        String::new()
-    } else {
-        unsafe { CStr::from_ptr(pointer) }
-            .to_string_lossy()
-            .into_owned()
-    }
 }
 
 #[cfg(test)]
@@ -275,6 +277,31 @@ mod tests {
         assert_eq!(bundle, "/Applications/Google Chrome.app");
         assert_eq!(bundle_name(bundle), "Google Chrome");
         assert_eq!(bundle_path("/usr/bin/zsh"), None);
+    }
+
+    #[test]
+    fn start_time_matches_bsdinfo() {
+        let pid = std::process::id() as i32;
+        let mut bsd = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = size_of::<libc::proc_bsdinfo>() as c_int;
+        // SAFETY: `bsd` is a zeroed, correctly sized buffer for this process's `proc_bsdinfo`.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                bsd.as_mut_ptr().cast::<c_void>(),
+                size,
+            )
+        };
+        assert_eq!(written, size);
+        // SAFETY: the successful call above initialized the full `proc_bsdinfo`.
+        let bsd = unsafe { bsd.assume_init() };
+        let expected = bsd
+            .pbi_start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(bsd.pbi_start_tvusec);
+        assert_eq!(start_time_us(pid), Some(expected));
     }
 
     #[test]

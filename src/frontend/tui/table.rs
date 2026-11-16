@@ -1,13 +1,15 @@
 //! The process, app, client, or queue table with adaptive columns.
+use super::fmt;
 
-use super::app::{App, Column, DisplayRow};
-use super::charts::{self};
+use super::app::{App, Column, DisplayRow, SortKey};
+use super::charts;
 use super::history::RowMetric;
 use super::style::{self, DIM, GPU, LABEL};
 use crate::format;
 use crate::model::{Activity, Report, SourceState};
-use crate::view::{Group, RowKey};
+use crate::view::{Group, Row, RowKey};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -15,6 +17,16 @@ use ratatui::widgets::{Block, Borders};
 
 use super::graphs::WhoChart;
 use super::ui::Density;
+
+/// Full scale of the GPU ms/s sparkline.
+const SPARKLINE_MAX_MSPS: f64 = 1000.0;
+
+struct Spark {
+    end: u64,
+    span: Option<(usize, u64)>,
+    coverage: Vec<f64>,
+}
+
 struct PlannedColumn {
     column: Column,
     header: &'static str,
@@ -151,7 +163,50 @@ pub(super) fn draw_table(
         app.hitboxes.table = Rect::default();
         return;
     }
-    // Title rule with the view state.
+    draw_title(frame, area, app);
+
+    let columns = plan_columns(app, area.width, density);
+    let header_y = area.y + 1;
+    let body = Rect::new(area.x, area.y + 2, area.width, area.height - 2);
+    app.hitboxes.table = body;
+    app.hitboxes.header_y = header_y;
+    app.hitboxes.header.clear();
+    draw_header(
+        frame.buffer_mut(),
+        &mut app.hitboxes,
+        &columns,
+        header_y,
+        app.sort,
+    );
+
+    if app.rows.is_empty() {
+        empty_message(frame.buffer_mut(), body, app);
+        return;
+    }
+
+    let end = app.history.latest_ms().unwrap_or(0);
+    let history_column = columns
+        .iter()
+        .find(|planned| planned.column == Column::History);
+    let spark_span = history_column.map(|planned| {
+        (
+            planned.width as usize,
+            planned.width as u64 * app.interval.as_millis().max(1) as u64,
+        )
+    });
+    let coverage = spark_span
+        .map(|(width, span)| app.history.coverage(end, span, width))
+        .unwrap_or_default();
+    let spark = Spark {
+        end,
+        span: spark_span,
+        coverage,
+    };
+
+    draw_rows(frame, area, body, app, &columns, who, &spark);
+}
+
+fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
     let level = match app.group {
         Group::Queue => "queues",
         Group::Client => "clients",
@@ -189,18 +244,18 @@ pub(super) fn draw_table(
         .border_style(style::dim())
         .title(Line::from(title));
     frame.render_widget(rule, Rect::new(area.x, area.y, area.width, 1));
+}
 
-    let columns = plan_columns(app, area.width, density);
-    let header_y = area.y + 1;
-    let body = Rect::new(area.x, area.y + 2, area.width, area.height - 2);
-    app.hitboxes.table = body;
-    app.hitboxes.header_y = header_y;
-    app.hitboxes.header.clear();
-
-    let buffer = frame.buffer_mut();
-    let mut x = area.x + 1;
-    for planned in &columns {
-        let sorted = planned.column.sort_key() == Some(app.sort)
+fn draw_header(
+    buffer: &mut Buffer,
+    hitboxes: &mut super::app::Hitboxes,
+    columns: &[PlannedColumn],
+    header_y: u16,
+    sort: SortKey,
+) {
+    let mut x = hitboxes.table.x + 1;
+    for planned in columns {
+        let sorted = planned.column.sort_key() == Some(sort)
             && !matches!(
                 planned.column,
                 Column::Share | Column::DevicePct | Column::History
@@ -216,10 +271,48 @@ pub(super) fn draw_table(
             style::label().add_modifier(Modifier::BOLD)
         };
         buffer.set_stringn(x, header_y, text, planned.width as usize, style);
-        app.hitboxes.header.push((x, planned.width, planned.column));
+        hitboxes.header.push((x, planned.width, planned.column));
         x += planned.width + 1;
     }
+}
 
+fn empty_message(buffer: &mut Buffer, body: Rect, app: &App) {
+    let text = if app.report.is_none() {
+        "waiting for the first sample...".to_string()
+    } else if !app.filter.is_empty() {
+        format!(
+            "nothing matches the filter \"{}\" (Esc clears it)",
+            app.filter
+        )
+    } else if let Some(reason) = app
+        .report
+        .as_ref()
+        .filter(|_| app.group == Group::App)
+        .and_then(apps_unavailable)
+    {
+        format!("no per-app data: {reason} (g switches the grouping level)")
+    } else {
+        "nothing used the GPU in this window (a shows idle GPU clients)".to_string()
+    };
+    buffer.set_stringn(
+        body.x + 2,
+        body.y,
+        text,
+        body.width as usize - 2,
+        style::dim(),
+    );
+}
+
+fn draw_rows(
+    frame: &mut Frame,
+    area: Rect,
+    body: Rect,
+    app: &mut App,
+    columns: &[PlannedColumn],
+    who: &WhoChart,
+    spark: &Spark,
+) {
+    let buffer = frame.buffer_mut();
     // Keep the selection visible.
     let visible = body.height as usize;
     if app.selected_index < app.scroll {
@@ -229,48 +322,6 @@ pub(super) fn draw_table(
     }
     app.scroll = app.scroll.min(app.rows.len().saturating_sub(visible));
 
-    if app.rows.is_empty() {
-        let text = if app.report.is_none() {
-            "waiting for the first sample...".to_string()
-        } else if !app.filter.is_empty() {
-            format!(
-                "nothing matches the filter \"{}\" (Esc clears it)",
-                app.filter
-            )
-        } else if let Some(reason) = app
-            .report
-            .as_ref()
-            .filter(|_| app.group == Group::App)
-            .and_then(apps_unavailable)
-        {
-            format!("no per-app data: {reason} (g switches the grouping level)")
-        } else {
-            "nothing used the GPU in this window (a shows idle GPU clients)".to_string()
-        };
-        buffer.set_stringn(
-            body.x + 2,
-            body.y,
-            text,
-            body.width as usize - 2,
-            style::dim(),
-        );
-        return;
-    }
-
-    let end = app.history.latest_ms().unwrap_or(0);
-    let history_column = columns
-        .iter()
-        .find(|planned| planned.column == Column::History);
-    let spark_span = history_column.map(|planned| {
-        (
-            planned.width as usize,
-            planned.width as u64 * app.interval.as_millis().max(1) as u64,
-        )
-    });
-    let spark_coverage = spark_span
-        .map(|(width, span)| app.history.coverage(end, span, width))
-        .unwrap_or_default();
-
     for (offset, display) in app.rows.iter().skip(app.scroll).take(visible).enumerate() {
         let y = body.y + offset as u16;
         let index = app.scroll + offset;
@@ -278,117 +329,44 @@ pub(super) fn draw_table(
         let row = &display.row;
         let active = row.activity == Activity::Active || row.busy_ms_per_s > 0.0;
         let mut x = area.x + 1;
-        for planned in &columns {
+        for planned in columns {
             let width = planned.width as usize;
-            let cell = |text: String, style: Style| -> (String, Style) {
-                (format::truncate(&text, width), style)
-            };
-            let dash = || ("-".to_string(), style::dim());
-            let (text, style) = match planned.column {
-                Column::Pid => match row.pid {
-                    Some(pid) => cell(pid.to_string(), style::label()),
-                    None => dash(),
-                },
-                Column::Name => {
-                    let line = name_line(display, who, width, active);
-                    buffer.set_line(x, y, &line, planned.width);
-                    x += planned.width + 1;
-                    continue;
-                }
-                Column::Gpu => cell(
-                    style::ms(row.busy_ms_per_s),
-                    if row.busy_ms_per_s > 0.0 {
-                        style::accent(GPU)
-                    } else {
-                        style::dim()
-                    },
-                ),
-                Column::Share => match row.share() {
-                    Some(value) => cell(style::pct(value), share_style(value)),
-                    None => dash(),
-                },
-                Column::DevicePct => match row.device_pct {
-                    Some(value) => cell(style::pct(value), share_style(value)),
-                    None => dash(),
-                },
-                Column::Power => match row.power_w {
-                    Some(value) => {
-                        let estimated = if row.power_estimated { "~" } else { "" };
-                        cell(
-                            format!("{estimated}{}", style::watts(value)),
-                            if value > 0.0 {
-                                style::accent(style::POWER)
-                            } else {
-                                style::dim()
-                            },
-                        )
-                    }
-                    None => dash(),
-                },
-                Column::Memory => match row.memory_bytes {
-                    Some(bytes) => cell(style::bytes_short(bytes), style::accent(style::MEMORY)),
-                    None => dash(),
-                },
-                // "-" when it could not be separated from overlapping work.
-                Column::Exited => match row.unattributed_ms_per_s {
-                    Some(value) if value >= 0.05 => cell(style::ms(value), style::label()),
-                    Some(_) => cell("0".into(), style::dim()),
-                    None => dash(),
-                },
-                Column::Children => {
-                    if row.key == RowKey::Unattributed {
-                        dash()
-                    } else {
-                        cell(row.children.to_string(), style::label())
-                    }
-                }
-                Column::Last => {
-                    let (glyph, color) = match row.activity {
-                        Activity::Active => ("●", GPU),
-                        Activity::Recent => ("◦", LABEL),
-                        Activity::Idle => (" ", DIM),
-                    };
-                    let age = match (row.last_submit_age_ms, row.activity) {
-                        (Some(age), _) => format::age_ms(age),
-                        (None, Activity::Idle) => "-".into(),
-                        (None, _) => String::new(),
-                    };
-                    buffer.set_line(
-                        x,
-                        y,
-                        &Line::from(vec![
-                            Span::styled(format!("{glyph} "), style::accent(color)),
-                            Span::styled(age, if active { style::label() } else { style::dim() }),
-                        ]),
-                        planned.width,
-                    );
-                    x += planned.width + 1;
-                    continue;
-                }
-                Column::Lifetime if row.key == RowKey::Unattributed => dash(),
-                Column::Lifetime => cell(
-                    format::seconds(row.lifetime_gpu_ns as f64 / 1e9),
-                    style::dim(),
-                ),
-                Column::History => {
-                    let (buckets, span) = spark_span.unwrap_or_default();
-                    let values = app.history.row_buckets(
-                        &row.key,
-                        RowMetric::Busy,
-                        end,
-                        span,
-                        &spark_coverage,
-                    );
-                    debug_assert_eq!(values.len(), buckets);
-                    cell(charts::sparkline(&values, 1000.0), style::accent(GPU))
-                }
-            };
+            if planned.column == Column::Name {
+                let line = name_line(display, who, width, active);
+                buffer.set_line(x, y, &line, planned.width);
+                x += planned.width + 1;
+                continue;
+            }
+            if planned.column == Column::Last {
+                let (glyph, color) = match row.activity {
+                    Activity::Active => ("●", GPU),
+                    Activity::Recent => ("◦", LABEL),
+                    Activity::Idle => (" ", DIM),
+                };
+                let age = match (row.last_submit_age_ms, row.activity) {
+                    (Some(age), _) => format::age_ms(age),
+                    (None, Activity::Idle) => "-".into(),
+                    (None, _) => String::new(),
+                };
+                buffer.set_line(
+                    x,
+                    y,
+                    &Line::from(vec![
+                        Span::styled(format!("{glyph} "), style::accent(color)),
+                        Span::styled(age, if active { style::label() } else { style::dim() }),
+                    ]),
+                    planned.width,
+                );
+                x += planned.width + 1;
+                continue;
+            }
+            let (text, text_style) = cell_for(planned, row, app, spark);
             let text = if planned.right {
                 format!("{text:>width$}")
             } else {
                 text
             };
-            buffer.set_stringn(x, y, text, width, style);
+            buffer.set_stringn(x, y, text, width, text_style);
             x += planned.width + 1;
         }
         if selected {
@@ -415,6 +393,86 @@ pub(super) fn draw_table(
             width as usize,
             style::dim(),
         );
+    }
+}
+
+fn cell_for(planned: &PlannedColumn, row: &Row, app: &App, spark: &Spark) -> (String, Style) {
+    let width = planned.width as usize;
+    let cell =
+        |text: String, style: Style| -> (String, Style) { (format::truncate(&text, width), style) };
+    let dash = || ("-".to_string(), style::dim());
+    match planned.column {
+        Column::Pid => match row.pid {
+            Some(pid) => cell(pid.to_string(), style::label()),
+            None => dash(),
+        },
+        Column::Gpu => cell(
+            fmt::ms(row.busy_ms_per_s),
+            if row.busy_ms_per_s > 0.0 {
+                style::accent(GPU)
+            } else {
+                style::dim()
+            },
+        ),
+        Column::Share => match row.share() {
+            Some(value) => cell(fmt::pct(value), share_style(value)),
+            None => dash(),
+        },
+        Column::DevicePct => match row.device_pct {
+            Some(value) => cell(fmt::pct(value), share_style(value)),
+            None => dash(),
+        },
+        Column::Power => match row.power_w {
+            Some(value) => {
+                let estimated = if row.power_estimated { "~" } else { "" };
+                cell(
+                    format!("{estimated}{}", fmt::watts_digits(value)),
+                    if value > 0.0 {
+                        style::accent(style::POWER)
+                    } else {
+                        style::dim()
+                    },
+                )
+            }
+            None => dash(),
+        },
+        Column::Memory => match row.memory_bytes {
+            Some(bytes) => cell(fmt::bytes_short(bytes), style::accent(style::MEMORY)),
+            None => dash(),
+        },
+        // "-" when it could not be separated from overlapping work.
+        Column::Exited => match row.unattributed_ms_per_s {
+            Some(value) if value >= 0.05 => cell(fmt::ms(value), style::label()),
+            Some(_) => cell("0".into(), style::dim()),
+            None => dash(),
+        },
+        Column::Children => {
+            if row.key == RowKey::Unattributed {
+                dash()
+            } else {
+                cell(row.children.to_string(), style::label())
+            }
+        }
+        Column::Lifetime if row.key == RowKey::Unattributed => dash(),
+        Column::Lifetime => cell(
+            format::seconds(row.lifetime_gpu_ns as f64 / 1e9),
+            style::dim(),
+        ),
+        Column::History => {
+            let (_, span) = spark.span.unwrap_or_default();
+            let values = app.history.row_buckets(
+                &row.key,
+                RowMetric::Busy,
+                spark.end,
+                span,
+                &spark.coverage,
+            );
+            cell(
+                charts::sparkline(&values, SPARKLINE_MAX_MSPS),
+                style::accent(GPU),
+            )
+        }
+        Column::Name | Column::Last => unreachable!("rendered directly in draw_rows"),
     }
 }
 

@@ -6,11 +6,9 @@ description = "Build the release binary"
 run = "cargo build --release"
 
 [tasks.install]
-description = "Build the release binary if needed and install it to ~/.local/bin"
+description = "Build the release binary and install it to ~/.local/bin"
 run = """
-if [ ! -x target/release/macgpu ]; then
-  cargo build --release
-fi
+cargo build --release
 install -d "$HOME/.local/bin"
 install -m 755 target/release/macgpu "$HOME/.local/bin/macgpu"
 echo "installed $HOME/.local/bin/macgpu"
@@ -21,7 +19,7 @@ description = "Build the debug binary"
 run = "cargo build"
 
 [tasks.test]
-description = "Run the unit tests and the end-to-end tests, which put real load on the GPU"
+description = "Run the unit tests and the non-ignored end-to-end tests; GPU-load tests are ignored"
 run = "cargo test --workspace"
 
 [tasks.test-unit]
@@ -29,8 +27,12 @@ description = "Run the unit tests only; fast and no GPU load"
 run = "cargo test --workspace --lib"
 
 [tasks.test-e2e]
-description = "Run the end-to-end tests; generates real Metal load and takes about a minute"
+description = "Run the end-to-end test binaries with their default, non-ignored tests; no GPU load"
 run = "cargo test --test apps_e2e --test attribution --test export_cli --test power_e2e"
+
+[tasks.test-hardware]
+description = "Run all tests, including the ignored hardware tests that generate real GPU load"
+run = "cargo test --workspace -- --include-ignored"
 
 [tasks.fmt]
 description = "Check Rust formatting"

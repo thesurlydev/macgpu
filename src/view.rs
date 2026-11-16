@@ -31,6 +31,16 @@ impl Group {
         }
     }
 
+    /// The previous level in the cycle queue, client, process, app.
+    pub fn prev(self) -> Self {
+        match self {
+            Group::Queue => Group::App,
+            Group::Client => Group::Queue,
+            Group::Process => Group::Client,
+            Group::App => Group::Process,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Group::Queue => "queue",
@@ -84,7 +94,7 @@ impl Row {
         (self.key != RowKey::Unattributed).then_some(self.share_pct)
     }
 
-    fn blank(key: RowKey, name: String) -> Self {
+    pub(crate) fn blank(key: RowKey, name: String) -> Self {
         Self {
             key,
             pid: None,
@@ -165,38 +175,37 @@ fn process_rows(report: &Report) -> Vec<Row> {
 }
 
 fn app_rows(report: &Report) -> Vec<Row> {
+    // A zero window is clamped to one nanosecond; every app uses this divisor.
+    let window_seconds = (report.window_seconds * 1e9).max(1.0) / 1e9;
     report
         .apps
         .iter()
-        .map(|app| {
-            let window_ns = (report.window_seconds * 1e9).max(1.0);
-            Row {
-                key: RowKey::App {
-                    coalition_id: app.coalition_id,
-                },
-                pid: app.responsible_pid,
-                name: app.name.clone(),
-                detail: app.bundle_path.clone(),
-                gpu_ns: app.gpu_ns,
-                busy_ms_per_s: app.busy_ms_per_s,
-                share_pct: app.share_pct,
-                device_pct: app.device_pct,
-                power_w: app.power_w,
-                power_estimated: false,
-                memory_bytes: app.graphics_memory_bytes,
-                lifetime_gpu_ns: app.lifetime_gpu_ns,
-                activity: if app.gpu_ns > 0 {
-                    Activity::Active
-                } else {
-                    Activity::Idle
-                },
-                last_submit_age_ms: None,
-                children: app.gpu_pids.len(),
-                unattributed_ms_per_s: app
-                    .unattributed_gpu_ns
-                    .map(|gpu_ns| gpu_ns as f64 / 1e6 / (window_ns / 1e9)),
-                uid: None,
-            }
+        .map(|app| Row {
+            key: RowKey::App {
+                coalition_id: app.coalition_id,
+            },
+            pid: app.responsible_pid,
+            name: app.name.clone(),
+            detail: app.bundle_path.clone(),
+            gpu_ns: app.gpu_ns,
+            busy_ms_per_s: app.busy_ms_per_s,
+            share_pct: app.share_pct,
+            device_pct: app.device_pct,
+            power_w: app.power_w,
+            power_estimated: false,
+            memory_bytes: app.graphics_memory_bytes,
+            lifetime_gpu_ns: app.lifetime_gpu_ns,
+            activity: if app.gpu_ns > 0 {
+                Activity::Active
+            } else {
+                Activity::Idle
+            },
+            last_submit_age_ms: None,
+            children: app.gpu_pids.len(),
+            unattributed_ms_per_s: app
+                .unattributed_gpu_ns
+                .map(|gpu_ns| gpu_ns as f64 / 1e6 / window_seconds),
+            uid: None,
         })
         .collect()
 }
@@ -482,5 +491,7 @@ mod tests {
     fn group_cycles() {
         assert_eq!(Group::Queue.next(), Group::Client);
         assert_eq!(Group::App.next(), Group::Queue);
+        assert_eq!(Group::Queue.prev(), Group::App);
+        assert_eq!(Group::Process.prev(), Group::Client);
     }
 }

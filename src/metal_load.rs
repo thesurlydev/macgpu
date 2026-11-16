@@ -184,7 +184,7 @@ impl LoadConfig {
 /// One line of the load's output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
-pub enum LoadEvent {
+enum LoadEvent {
     Ready(Ready),
     Done(LoadResult),
 }
@@ -498,7 +498,7 @@ pub const TOLERANCE_PCT: f64 = 4.0;
 /// up to +5% at 50% duty.
 pub const OVER_TOLERANCE_PCT: f64 = 6.0;
 /// Accepted error of the contention model.
-pub const CONTENTION_TOLERANCE_PCT: f64 = 6.0;
+const CONTENTION_TOLERANCE_PCT: f64 = 6.0;
 /// Absolute slack for timestamp granularity and sample alignment.
 pub const SLACK_NS: u64 = 5_000_000;
 /// The GPU counts as quiet when other processes used less than this share of

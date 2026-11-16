@@ -1,5 +1,7 @@
 //! Platform readers. Each converts OS data into plain, `Send` Rust values.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod cf;
 pub mod clock;
 pub mod coalition;

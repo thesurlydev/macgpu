@@ -13,13 +13,9 @@
 //! - `responsibility_get_pid_responsible_for_pid` names the app a process
 //!   belongs to (private, but exported by libSystem).
 //!
-//! Cost: a read costs about 1 µs per task in the coalition (the kernel sums
-//! every member's ledgers), and every syscall is several times slower when the
-//! sampler wakes on an efficiency core. On an M4 Max with about 1,000
-//! processes and 800 coalitions, reading every coalition each second cost
-//! 1.2-9 ms, yet only a few dozen coalitions were using the GPU. The reader
-//! therefore reads every sample only the coalitions that have a member owning
-//! a GPU client or whose GPU, ANE or energy counters moved at their last read.
+//! Cost: a read sums every member's ledgers, so the reader reads on every
+//! sample only the coalitions that have a member owning a GPU client or whose
+//! GPU, ANE or energy counters moved at their last read.
 //! Other coalitions with tasks are read every [`COLD_REFRESH`], staggered
 //! across samples, and an empty coalition once more after its last task exits
 //! (nothing can charge it after that). PID to
@@ -88,12 +84,16 @@ mod slot {
     pub const GPU_ENERGY_NJ_BILLED_TO_ME: usize = 42;
     /// GPU energy this coalition used on others' behalf.
     pub const GPU_ENERGY_NJ_BILLED_TO_OTHERS: usize = 43;
-    /// Buffer size in slots; the macOS 27 kernel fills 50.
+    /// Buffer size in slots; the kernel copies at most its own struct size,
+    /// which may grow, so the buffer is larger than any known layout.
     pub const BUFFER: usize = 64;
 }
 
 /// Marks buffer slots the kernel did not write.
 const UNWRITTEN: u64 = u64::MAX;
+
+/// Number of phases used to spread cold coalition reads across samples.
+const COLD_PHASES: u64 = 16;
 
 unsafe extern "C" {
     fn proc_listcoalitions(
@@ -219,6 +219,16 @@ impl CoalitionTable {
     /// Builds a table from coalitions; the PID index comes from their members.
     pub fn new(coalitions: Vec<Coalition>, has_gpu_energy: bool, has_ane: bool) -> Self {
         let read_count = coalitions.len();
+        Self::new_with_read_count(coalitions, has_gpu_energy, has_ane, read_count)
+    }
+
+    /// Builds a table with the number of coalitions whose counters this read.
+    fn new_with_read_count(
+        coalitions: Vec<Coalition>,
+        has_gpu_energy: bool,
+        has_ane: bool,
+        read_count: usize,
+    ) -> Self {
         let mut pids = HashMap::new();
         let coalitions = coalitions
             .into_iter()
@@ -260,6 +270,9 @@ impl CoalitionTable {
     }
 }
 
+/// Member PIDs per coalition and the coalitions that own GPU clients.
+type Memberships = (HashMap<u64, Vec<i32>>, HashSet<u64>);
+
 /// What the reader remembers about a live PID.
 #[derive(Clone, Copy)]
 struct PidEntry {
@@ -287,7 +300,9 @@ struct Tracked {
 pub struct CoalitionReader {
     pids: HashMap<i32, PidEntry>,
     tracked: HashMap<u64, Tracked>,
-    /// Process info for leaders, kept while the PID stays live.
+    /// Process info for leaders. Entries are dropped as soon as the PID leaves
+    /// a listing, so a reused PID cannot inherit a stale leader without the
+    /// extra start-time sysctl a `ProcessCache` would run.
     leaders: HashMap<i32, Option<ProcessInfo>>,
     /// Highest slot index the kernel writes, learned on the first read.
     written_slots: Option<usize>,
@@ -309,12 +324,15 @@ impl CoalitionReader {
         let generation = self.generation;
         let listed = list_coalitions()?;
 
-        // Membership, from cached or fresh PID lookups.
-        let live_pids = process::all_pids();
-        if live_pids.is_empty() {
-            bail!("proc_listallpids failed");
-        }
-        let mut members: HashMap<u64, Vec<i32>> = HashMap::with_capacity(listed.len());
+        let (members, gpu_coalitions) = self.read_membership(generation)?;
+        let read_count = self.read_counters(&listed, &gpu_coalitions, generation, now)?;
+        Ok(self.assemble_table(members, &gpu_coalitions, gpu_pids, read_count))
+    }
+
+    /// Resolves every live PID to its coalition, from cached or fresh lookups.
+    fn read_membership(&mut self, generation: u64) -> Result<Memberships> {
+        let live_pids = process::try_all_pids()?;
+        let mut members: HashMap<u64, Vec<i32>> = HashMap::new();
         for pid in live_pids {
             let coalition = match self.pids.get_mut(&pid) {
                 Some(entry) => {
@@ -341,17 +359,28 @@ impl CoalitionReader {
         self.pids.retain(|_, entry| entry.seen == generation);
         let pids = &self.pids;
         self.leaders.retain(|pid, _| pids.contains_key(pid));
-        let gpu_coalitions: HashSet<u64> = gpu_pids
-            .iter()
-            .filter_map(|pid| self.pids.get(pid).map(|entry| entry.coalition))
+        let gpu_coalitions = pids
+            .values()
+            .filter(|entry| members.contains_key(&entry.coalition))
+            .map(|entry| entry.coalition)
             .collect();
+        Ok((members, gpu_coalitions))
+    }
 
-        // Counters.
+    /// Reads the counters of coalitions that are active, own a GPU client or
+    /// are due for a cold refresh. Returns how many coalitions were read.
+    fn read_counters(
+        &mut self,
+        listed: &[ProcInfoCoalInfo],
+        gpu_coalitions: &HashSet<u64>,
+        generation: u64,
+        now: Instant,
+    ) -> Result<usize> {
         let mut buffer = [UNWRITTEN; slot::BUFFER];
         let mut read_count = 0;
         let mut failures = 0;
         let mut last_error = None;
-        for info in &listed {
+        for info in listed {
             let id = info.coalition_id;
             let due = match self.tracked.get_mut(&id) {
                 None => true,
@@ -365,6 +394,7 @@ impl CoalitionReader {
                 continue;
             }
             buffer.fill(UNWRITTEN);
+            // SAFETY: `buffer` is writable for `size_of_val` bytes, the size passed to the kernel.
             let result = unsafe {
                 coalition_info_resource_usage(
                     id,
@@ -404,8 +434,7 @@ impl CoalitionReader {
             tracked.due = now + COLD_REFRESH;
             if first_read {
                 // Stagger cold reads so they do not all land on one sample.
-                let phases = 16;
-                tracked.due -= COLD_REFRESH * (id % phases) as u32 / phases as u32;
+                tracked.due -= COLD_REFRESH * (id % COLD_PHASES) as u32 / COLD_PHASES as u32;
             }
         }
         self.tracked.retain(|_, tracked| tracked.seen == generation);
@@ -417,7 +446,17 @@ impl CoalitionReader {
                     .unwrap_or_default()
             );
         }
+        Ok(read_count)
+    }
 
+    /// Assembles membership, counters and leaders into the sample's table.
+    fn assemble_table(
+        &mut self,
+        mut members: HashMap<u64, Vec<i32>>,
+        gpu_coalitions: &HashSet<u64>,
+        gpu_pids: &[i32],
+        read_count: usize,
+    ) -> CoalitionTable {
         let gpu_pid_set: HashSet<i32> = gpu_pids.iter().copied().collect();
         let mut coalitions = Vec::with_capacity(self.tracked.len());
         for (id, tracked) in &self.tracked {
@@ -450,13 +489,12 @@ impl CoalitionReader {
         }
 
         let written = self.written_slots.unwrap_or(0);
-        let mut table = CoalitionTable::new(
+        CoalitionTable::new_with_read_count(
             coalitions,
             written >= slot::GPU_ENERGY_NJ_BILLED_TO_OTHERS,
             written >= slot::ANE_ENERGY_NJ,
-        );
-        table.read_count = read_count;
-        Ok(table)
+            read_count,
+        )
     }
 }
 
@@ -466,6 +504,7 @@ fn list_coalitions() -> Result<Vec<ProcInfoCoalInfo>> {
     let mut capacity = 1024usize;
     loop {
         let mut list = vec![ProcInfoCoalInfo::default(); capacity];
+        // SAFETY: `list` is writable for `(capacity * element)` bytes and the return is only read as a count.
         let bytes = unsafe {
             proc_listcoalitions(
                 LISTCOALITIONS_SINGLE_TYPE,
@@ -492,9 +531,10 @@ fn list_coalitions() -> Result<Vec<ProcInfoCoalInfo>> {
 }
 
 /// The resource coalition `pid` belongs to. Works for every user's processes.
-pub fn coalition_of_pid(pid: i32) -> Option<u64> {
+fn coalition_of_pid(pid: i32) -> Option<u64> {
     let mut info = ProcPidCoalitionInfo::default();
     let size = size_of::<ProcPidCoalitionInfo>() as c_int;
+    // SAFETY: `info` is a zeroed, correctly sized buffer for `PROC_PIDCOALITIONINFO` output.
     let written = unsafe {
         libc::proc_pidinfo(
             pid,
@@ -509,7 +549,8 @@ pub fn coalition_of_pid(pid: i32) -> Option<u64> {
 
 /// The PID `pid` is responsible to, for example the app of an XPC service.
 /// `None` when the kernel has none (WindowServer) or the process is gone.
-pub fn responsible_pid(pid: i32) -> Option<i32> {
+fn responsible_pid(pid: i32) -> Option<i32> {
+    // SAFETY: the function takes a pid by value and returns a pid or a non-positive sentinel.
     let responsible = unsafe { responsibility_get_pid_responsible_for_pid(pid) };
     (responsible > 0).then_some(responsible)
 }
@@ -618,7 +659,7 @@ mod tests {
     /// Live: every process's coalition is readable without root, including
     /// WindowServer's, which another user owns.
     #[test]
-    #[ignore]
+    #[ignore = "needs Apple Silicon hardware and a live coalition table"]
     fn reads_live_coalitions() {
         let own = std::process::id() as i32;
         let mut reader = CoalitionReader::new();
@@ -721,10 +762,9 @@ mod tests {
     /// other members only add to it), and `gpu_energy_nj` (slot 41), once it
     /// has settled, must imply a plausible power. The process's `AppUsage`
     /// time must be close: it also counts per-command-buffer overhead outside
-    /// the spans (measured +7% with about 1 ms buffers), and reads lower when
-    /// other GPU work overlaps.
+    /// the spans, and reads lower when other GPU work overlaps.
     #[test]
-    #[ignore]
+    #[ignore = "needs Apple Silicon hardware and a Metal device"]
     fn gpu_slots_track_metal_work() {
         use crate::sys::iokit::RegistryReader;
         let own = std::process::id() as i32;

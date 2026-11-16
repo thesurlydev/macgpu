@@ -13,7 +13,7 @@
 //! - Raw values are never clamped or rescaled across processes; normalized
 //!   values are separate fields.
 
-use super::{RECENT_SECONDS, ms_per_s, pct};
+use super::{NS_PER_MS, RECENT_SECONDS, ms_per_s, pct, saturating_sum};
 use crate::snapshot::Snapshot;
 use crate::sys::iokit::{GpuClient, QueueUsage};
 use macgpu_model::{Activity, ClientView, ProcessView, QueueView};
@@ -67,9 +67,7 @@ pub(super) fn build(previous: &Snapshot, current: &Snapshot, window_ns: u64) -> 
         process.clients.push(view);
     }
 
-    let total_ns = by_pid
-        .values()
-        .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
+    let total_ns = saturating_sum(by_pid.values().map(|process| process.gpu_ns));
     let mut processes: Vec<ProcessView> = by_pid.into_values().collect();
     for process in &mut processes {
         process.busy_ms_per_s = ms_per_s(process.gpu_ns, window_ns);
@@ -150,9 +148,7 @@ fn client_view(
         });
     }
 
-    let gpu_ns = queues
-        .iter()
-        .fold(0u64, |total, queue| total.saturating_add(queue.gpu_ns));
+    let gpu_ns = saturating_sum(queues.iter().map(|queue| queue.gpu_ns));
     ClientView {
         registry_id: client.registry_id,
         gpu_ns,
@@ -182,7 +178,7 @@ fn continues(previous: &QueueUsage, current: &QueueUsage) -> bool {
 /// and each persisting queue's counters never go down. This finds the longest
 /// such pairing (an LCS under the [`continues`] relation). Unpaired current
 /// entries are new queues; unpaired previous entries were destroyed.
-pub fn align_queues(previous: &[QueueUsage], current: &[QueueUsage]) -> Vec<Option<usize>> {
+pub(super) fn align_queues(previous: &[QueueUsage], current: &[QueueUsage]) -> Vec<Option<usize>> {
     if previous.len() == current.len()
         && previous
             .iter()
@@ -224,7 +220,8 @@ pub fn align_queues(previous: &[QueueUsage], current: &[QueueUsage]) -> Vec<Opti
 }
 
 fn submit_age_ms(last_submitted_ns: u64, mach_now_ns: u64) -> Option<u64> {
-    (last_submitted_ns > 0).then(|| mach_now_ns.saturating_sub(last_submitted_ns) / 1_000_000)
+    (last_submitted_ns > 0)
+        .then(|| mach_now_ns.saturating_sub(last_submitted_ns) / NS_PER_MS as u64)
 }
 
 fn activity(gpu_ns: u64, last_submit_age_ms: Option<u64>) -> Activity {
@@ -252,15 +249,11 @@ mod tests {
 
     const SECOND: u64 = 1_000_000_000;
 
-    fn pair(previous: &[QueueUsage], current: &[QueueUsage]) -> Vec<Option<usize>> {
-        align_queues(previous, current)
-    }
-
     #[test]
     fn aligns_unchanged_queues_positionally() {
         let previous = [queue(10, 1), queue(20, 2)];
         let current = [queue(15, 3), queue(20, 2)];
-        assert_eq!(pair(&previous, &current), vec![Some(0), Some(1)]);
+        assert_eq!(align_queues(&previous, &current), vec![Some(0), Some(1)]);
     }
 
     #[test]
@@ -272,26 +265,25 @@ mod tests {
             queue(7 * SECOND, 7),
         ];
         let current = [queue(100 * SECOND + 10, 8), queue(7 * SECOND + 20, 9)];
-        assert_eq!(pair(&previous, &current), vec![Some(0), Some(2)]);
+        assert_eq!(align_queues(&previous, &current), vec![Some(0), Some(2)]);
     }
 
     #[test]
     fn aligns_when_a_queue_is_added() {
         let previous = [queue(50, 1)];
         let current = [queue(60, 2), queue(5, 3)];
-        assert_eq!(pair(&previous, &current), vec![Some(0), None]);
+        assert_eq!(align_queues(&previous, &current), vec![Some(0), None]);
     }
 
     #[test]
     fn aligns_when_one_queue_is_replaced() {
         let previous = [queue(1_000, 10), queue(2_000, 20)];
         let current = [queue(1_500, 30), queue(40, 31)];
-        assert_eq!(pair(&previous, &current), vec![Some(0), None]);
+        assert_eq!(align_queues(&previous, &current), vec![Some(0), None]);
     }
 
-    /// Regression test for the lifetime-sized delta bug: when a client's summed
-    /// counter went down because a queue was destroyed, the old code credited
-    /// the client's entire remaining lifetime to the window.
+    /// A destroyed queue contributes no delta: only the surviving queue's own
+    /// counter increase is credited to the window.
     #[test]
     fn destroyed_queue_does_not_inflate_window() {
         let base = Instant::now();

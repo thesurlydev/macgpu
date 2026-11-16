@@ -3,18 +3,17 @@
 //! Talks to the `AppleSMC` user client with `IOConnectCallStructMethod`
 //! selector 2, which needs no root. The SMC exposes thousands of four-letter
 //! keys; the GPU die sensors are the 4-byte float (`flt `) keys starting with
-//! `Tg`. They come in pairs about 5.6 C apart and track GPU load (about 60 C
-//! idle and 93 C average under full load on an M4 Max).
+//! `Tg`. They come in pairs about 5.6 C apart and track GPU load.
 //!
 //! The key list is sorted, so the reader binary-searches the `Tg` range once at
 //! startup, caches each key's info, and then needs one SMC call per sensor per
 //! read.
 
-use super::iokit::{self, IoObject, KERN_SUCCESS, io_object_t};
+use super::iokit::{self, IoObject, KERN_SUCCESS, io_connect_t};
 use anyhow::{Context, Result, bail};
 use std::ffi::c_void;
 
-/// The `AppleSMC` user-client method that takes and returns [`KeyData`].
+/// Selector 2 of the `AppleSMC` user client exchanges a [`KeyData`] request and reply.
 const SELECTOR_HANDLE_YPC_EVENT: u32 = 2;
 /// `KeyData::data8` commands.
 const CMD_READ_BYTES: u8 = 5;
@@ -27,13 +26,10 @@ const GPU_PREFIX: &[u8; 2] = b"Tg";
 const TYPE_FLOAT: u32 = u32::from_be_bytes(*b"flt ");
 
 /// Readings outside this range are treated as invalid rather than averaged.
-///
-/// While the GPU idles its sensors sometimes stop reporting for about a second
-/// at a time, all at once: on an M4 Max (macOS 27), twice in 4 minutes of idle,
-/// every `Tg` key read one of the fixed values -4.0, 0.0, 1.6, or 1.8 C between
-/// readings of 50-60 C. A running die is never colder than its surroundings,
-/// so anything below 10 C is one of these placeholders, not a temperature.
+/// Idle sensors report fixed low placeholders (-4.0 to 1.8 C) in place of a
+/// temperature; a running die stays above ambient.
 pub const MIN_PLAUSIBLE_C: f64 = 10.0;
+/// Upper bound for a GPU die reading; values above it are sensor errors.
 const MAX_PLAUSIBLE_C: f64 = 150.0;
 
 #[repr(C)]
@@ -125,10 +121,11 @@ impl GpuTemperatures {
 }
 
 /// An open SMC connection, closed on drop.
-struct Connection(io_object_t);
+struct Connection(io_connect_t);
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is the connection this struct owns, closed exactly once here.
         unsafe { iokit::IOServiceClose(self.0) };
     }
 }
@@ -138,6 +135,7 @@ impl Connection {
         let service: IoObject =
             iokit::matching_service("AppleSMC").context("no AppleSMC service")?;
         let mut connection = 0;
+        // SAFETY: `service.raw()` is owned by the caller, `connection` is a valid out-parameter, and the returned connection is owned by `Self`.
         let result = unsafe {
             iokit::IOServiceOpen(
                 service.raw(),
@@ -155,6 +153,7 @@ impl Connection {
     fn call(&self, input: &KeyData) -> Option<KeyData> {
         let mut output = KeyData::default();
         let mut output_size = std::mem::size_of::<KeyData>();
+        // SAFETY: `input` lives for the call, `output` has room for `size_of::<KeyData>()` bytes, and the call owns neither buffer.
         let result = unsafe {
             iokit::IOConnectCallStructMethod(
                 self.0,
@@ -200,7 +199,7 @@ impl Connection {
         let key = u32::from_be_bytes(*b"#KEY");
         let info = self.key_info(key)?;
         let bytes = self.read_bytes(key, info)?;
-        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Some(u32::from_be_bytes(bytes[..4].try_into().ok()?))
     }
 }
 
@@ -243,18 +242,13 @@ impl SmcReader {
         })
     }
 
-    /// Number of GPU sensors found at startup.
-    pub fn sensor_count(&self) -> usize {
-        self.sensors.len()
-    }
-
-    pub fn read(&mut self) -> Result<GpuTemperatures> {
+    pub fn read(&self) -> Result<GpuTemperatures> {
         let sensors: Vec<SensorReading> = self
             .sensors
             .iter()
             .filter_map(|sensor| {
                 let bytes = self.connection.read_bytes(sensor.key, sensor.info)?;
-                let celsius = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let celsius = f32::from_le_bytes(bytes[..4].try_into().ok()?);
                 celsius.is_finite().then(|| SensorReading {
                     key: sensor.name.clone(),
                     celsius: f64::from(celsius),
@@ -333,7 +327,7 @@ mod tests {
 
     #[test]
     fn idle_placeholders_are_not_temperatures() {
-        // What all 44 sensors of an idle M4 Max read for about a second.
+        // Fixed low values reported by idle sensors.
         let placeholders = GpuTemperatures {
             sensors: [-4.0, 1.6, 0.0, 1.8, 1.6, -4.0]
                 .iter()
@@ -359,10 +353,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs Apple Silicon hardware and an AppleSMC user client"]
     fn reads_live_gpu_sensors() {
         let started = std::time::Instant::now();
-        let mut reader = SmcReader::new().expect("open SMC");
+        let reader = SmcReader::new().expect("open SMC");
         let startup = started.elapsed();
         reader.read().expect("warm-up read");
         let started = std::time::Instant::now();
@@ -373,7 +367,7 @@ mod tests {
         let (mean, max, count) = temperatures.summary().expect("plausible readings");
         eprintln!(
             "SMC: {} sensors, startup {:.1} ms, read {:.2} ms wall {:.2} ms cpu, avg {mean:.1} C, max {max:.1} C",
-            reader.sensor_count(),
+            temperatures.sensors.len(),
             startup.as_secs_f64() * 1e3,
             read.as_secs_f64() * 1e3,
             cpu as f64 / 1e6

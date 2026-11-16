@@ -7,19 +7,24 @@
 //! tested directly; rendering is tested with ratatui's `TestBackend`.
 
 mod app;
+#[cfg(test)]
+mod app_tests;
 mod charts;
 mod detail;
+mod fmt;
 mod graphs;
 mod header;
 mod help;
 mod history;
+mod input;
 mod linger;
-mod style;
-#[doc(hidden)]
-pub mod synthetic;
-mod table;
 #[cfg(test)]
-mod tests;
+mod render_tests;
+mod sort;
+mod style;
+#[cfg(test)]
+mod synthetic;
+mod table;
 mod tree;
 mod ui;
 

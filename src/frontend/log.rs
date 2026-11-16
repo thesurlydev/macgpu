@@ -11,7 +11,7 @@
 
 use super::alerts::{self, AlertArgs, Alerts};
 use super::signals;
-use super::table::ALERT_EXIT_CODE;
+use super::table::{alert_exit_code, is_broken_pipe};
 use crate::cli::{SamplingArgs, SelectionArgs};
 use crate::engine::Engine;
 use crate::model::{EventKind, Report};
@@ -22,7 +22,6 @@ use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -197,10 +196,10 @@ pub fn run(args: &LogArgs) -> Result<i32> {
             if signals::take().is_some() {
                 break;
             }
-            let mut report = match engine.recv_timeout(Duration::from_millis(200)) {
-                Ok(report) => report,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => break,
+            let mut report = match signals::recv_or_stop(|timeout| engine.recv_timeout(timeout)) {
+                signals::Recv::Item(report) => report,
+                signals::Recv::Timeout => continue,
+                signals::Recv::Stop | signals::Recv::Disconnected => break,
             };
             alert_fired |= alerts.evaluate(&mut report);
             for line in formatter.lines(&report) {
@@ -214,17 +213,13 @@ pub fn run(args: &LogArgs) -> Result<i32> {
                 break;
             }
         }
-        Ok(if args.alerts.exit_on_alert && alert_fired {
-            ALERT_EXIT_CODE
-        } else {
-            0
-        })
+        Ok(alert_exit_code(args.alerts.exit_on_alert, alert_fired))
     })();
 
     match result {
         Ok(code) => Ok(code),
         // `macgpu log | head` closes the pipe: a normal way to stop.
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(0),
+        Err(error) if is_broken_pipe(&error) => Ok(0),
         Err(error) => Err(error).context("failed to write log output"),
     }
 }
@@ -242,34 +237,46 @@ pub struct LineFormatter {
     first_timestamp_ms: Option<u64>,
 }
 
-/// CSV columns, the same for every line type.
-pub const CSV_COLUMNS: [&str; 25] = [
-    "time",
-    "type",
-    "pid",
-    "id",
-    "busy_ms_per_s",
-    "in_flight_ms_per_s",
-    "share_pct",
-    "device_pct",
-    "power_w",
-    "power_estimated",
-    "gpu_memory_bytes",
-    "children",
-    "last_submit_s",
-    "active_pct",
-    "normalized_pct",
-    "mhz",
-    "temp_c",
-    "temp_max_c",
-    "limited_pct",
-    "active_processes",
-    "window_s",
-    "event",
-    "name",
-    "path",
-    "message",
-];
+macro_rules! csv_columns {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// CSV columns, the same for every line type.
+        pub const CSV_COLUMNS: [&str; 25] = [$($name),+];
+
+        /// Typed column index: a set call cannot name a column that does not exist.
+        #[repr(usize)]
+        enum Column {
+            $($variant),+
+        }
+    };
+}
+
+csv_columns! {
+    Time => "time",
+    Type => "type",
+    Pid => "pid",
+    Id => "id",
+    BusyMsPerS => "busy_ms_per_s",
+    InFlightMsPerS => "in_flight_ms_per_s",
+    SharePct => "share_pct",
+    DevicePct => "device_pct",
+    PowerW => "power_w",
+    PowerEstimated => "power_estimated",
+    GpuMemoryBytes => "gpu_memory_bytes",
+    Children => "children",
+    LastSubmitS => "last_submit_s",
+    ActivePct => "active_pct",
+    NormalizedPct => "normalized_pct",
+    Mhz => "mhz",
+    TempC => "temp_c",
+    TempMaxC => "temp_max_c",
+    LimitedPct => "limited_pct",
+    ActiveProcesses => "active_processes",
+    WindowS => "window_s",
+    Event => "event",
+    Name => "name",
+    Path => "path",
+    Message => "message",
+}
 
 const DASH: &str = "-";
 const MIB: f64 = 1024.0 * 1024.0;
@@ -383,40 +390,40 @@ impl LineFormatter {
 
     fn device_line(&self, time: &str, report: &Report) -> String {
         let device = &report.device;
-        let limited = alerts::limited_pct(device);
+        let limited = device.limited_pct();
         if self.csv {
             let mut cells = Csv::new(time, "device");
             cells.set(
-                "busy_ms_per_s",
+                Column::BusyMsPerS,
                 num(Some(report.totals.attributed_ms_per_s), 1),
             );
-            cells.set("power_w", num(device.power_w, 3));
-            cells.set("power_estimated", "false".into());
+            cells.set(Column::PowerW, num(device.power_w, 3));
+            cells.set(Column::PowerEstimated, "false".into());
             cells.set(
-                "gpu_memory_bytes",
+                Column::GpuMemoryBytes,
                 device
                     .memory
                     .in_use_bytes
                     .map(|b| b.to_string())
                     .unwrap_or_default(),
             );
-            cells.set("active_pct", num(device.active_pct, 2));
-            cells.set("normalized_pct", num(device.freq_normalized_pct, 2));
-            cells.set("mhz", num(device.avg_mhz, 0));
+            cells.set(Column::ActivePct, num(device.active_pct, 2));
+            cells.set(Column::NormalizedPct, num(device.freq_normalized_pct, 2));
+            cells.set(Column::Mhz, num(device.avg_mhz, 0));
             cells.set(
-                "temp_c",
+                Column::TempC,
                 num(device.temperature.as_ref().map(|t| t.avg_c), 1),
             );
             cells.set(
-                "temp_max_c",
+                Column::TempMaxC,
                 num(device.temperature.as_ref().map(|t| t.max_c), 1),
             );
-            cells.set("limited_pct", num(limited, 1));
+            cells.set(Column::LimitedPct, num(limited, 1));
             cells.set(
-                "active_processes",
+                Column::ActiveProcesses,
                 report.totals.active_processes.to_string(),
             );
-            cells.set("window_s", num(Some(report.window_seconds), 3));
+            cells.set(Column::WindowS, num(Some(report.window_seconds), 3));
             return cells.finish();
         }
         format!(
@@ -459,29 +466,29 @@ impl LineFormatter {
         if self.csv {
             let mut cells = Csv::new(time, kind);
             cells.set(
-                "pid",
+                Column::Pid,
                 row.pid.map(|pid| pid.to_string()).unwrap_or_default(),
             );
-            cells.set("id", id.unwrap_or_default());
-            cells.set("busy_ms_per_s", num(Some(row.busy_ms_per_s), 3));
-            cells.set("in_flight_ms_per_s", num(in_flight, 3));
-            cells.set("share_pct", num(row.share(), 2));
-            cells.set("device_pct", num(row.device_pct, 2));
-            cells.set("power_w", num(row.power_w, 3));
+            cells.set(Column::Id, id.unwrap_or_default());
+            cells.set(Column::BusyMsPerS, num(Some(row.busy_ms_per_s), 3));
+            cells.set(Column::InFlightMsPerS, num(in_flight, 3));
+            cells.set(Column::SharePct, num(row.share(), 2));
+            cells.set(Column::DevicePct, num(row.device_pct, 2));
+            cells.set(Column::PowerW, num(row.power_w, 3));
             if row.power_w.is_some() {
-                cells.set("power_estimated", row.power_estimated.to_string());
+                cells.set(Column::PowerEstimated, row.power_estimated.to_string());
             }
             cells.set(
-                "gpu_memory_bytes",
+                Column::GpuMemoryBytes,
                 row.memory_bytes.map(|b| b.to_string()).unwrap_or_default(),
             );
             if row.key != RowKey::Unattributed {
-                cells.set("children", row.children.to_string());
+                cells.set(Column::Children, row.children.to_string());
             }
-            cells.set("last_submit_s", num(last, 1));
-            cells.set("window_s", num(Some(report.window_seconds), 3));
-            cells.set("name", row.name.clone());
-            cells.set("path", row.detail.clone().unwrap_or_default());
+            cells.set(Column::LastSubmitS, num(last, 1));
+            cells.set(Column::WindowS, num(Some(report.window_seconds), 3));
+            cells.set(Column::Name, row.name.clone());
+            cells.set(Column::Path, row.detail.clone().unwrap_or_default());
             return cells.finish();
         }
         let mut line = format!(
@@ -520,9 +527,9 @@ impl LineFormatter {
         let kind = event_kind_name(kind);
         if self.csv {
             let mut cells = Csv::new(time, "event");
-            cells.set("event", kind.to_string());
-            cells.set("window_s", num(Some(report.window_seconds), 3));
-            cells.set("message", message.to_string());
+            cells.set(Column::Event, kind.to_string());
+            cells.set(Column::WindowS, num(Some(report.window_seconds), 3));
+            cells.set(Column::Message, message.to_string());
             return cells.finish();
         }
         format!(
@@ -552,7 +559,7 @@ pub fn event_kind_name(kind: EventKind) -> &'static str {
     }
 }
 
-/// A CSV line with [`CSV_COLUMNS`], filled by name.
+/// A CSV line with [`CSV_COLUMNS`], filled by typed index.
 struct Csv {
     cells: Vec<String>,
 }
@@ -562,17 +569,13 @@ impl Csv {
         let mut csv = Self {
             cells: vec![String::new(); CSV_COLUMNS.len()],
         };
-        csv.set("time", time.to_string());
-        csv.set("type", kind.to_string());
+        csv.set(Column::Time, time.to_string());
+        csv.set(Column::Type, kind.to_string());
         csv
     }
 
-    fn set(&mut self, column: &str, value: String) {
-        let index = CSV_COLUMNS
-            .iter()
-            .position(|name| *name == column)
-            .expect("known CSV column");
-        self.cells[index] = value;
+    fn set(&mut self, column: Column, value: String) {
+        self.cells[column as usize] = value;
     }
 
     fn finish(self) -> String {
@@ -593,18 +596,19 @@ pub fn csv_escape(cell: &str) -> String {
     }
 }
 
-fn num(value: Option<f64>, decimals: usize) -> String {
+fn format_value(value: Option<f64>, decimals: usize, fallback: &str) -> String {
     value
         .filter(|value| value.is_finite())
         .map(|value| format!("{value:.decimals$}"))
-        .unwrap_or_default()
+        .unwrap_or_else(|| fallback.into())
+}
+
+fn num(value: Option<f64>, decimals: usize) -> String {
+    format_value(value, decimals, "")
 }
 
 fn dash(value: Option<f64>, decimals: usize) -> String {
-    value
-        .filter(|value| value.is_finite())
-        .map(|value| format!("{value:.decimals$}"))
-        .unwrap_or_else(|| DASH.into())
+    format_value(value, decimals, DASH)
 }
 
 /// Formats a Unix-epoch millisecond timestamp.
@@ -619,7 +623,9 @@ pub fn format_time(format: TimeFormat, timestamp_ms: u64, first_ms: u64) -> Stri
             timestamp_ms.saturating_sub(first_ms) as f64 / 1000.0
         ),
         TimeFormat::Utc => {
-            let tm = broken_down(seconds, false);
+            let Some(tm) = broken_down(seconds, false) else {
+                return "unavailable".into();
+            };
             format!(
                 "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{millis:03}Z",
                 tm.tm_year + 1900,
@@ -631,7 +637,9 @@ pub fn format_time(format: TimeFormat, timestamp_ms: u64, first_ms: u64) -> Stri
             )
         }
         TimeFormat::Iso => {
-            let tm = broken_down(seconds, true);
+            let Some(tm) = broken_down(seconds, true) else {
+                return "unavailable".into();
+            };
             let offset_minutes = tm.tm_gmtoff / 60;
             let sign = if offset_minutes < 0 { '-' } else { '+' };
             let offset_minutes = offset_minutes.abs();
@@ -648,23 +656,27 @@ pub fn format_time(format: TimeFormat, timestamp_ms: u64, first_ms: u64) -> Stri
             )
         }
         TimeFormat::Clock => {
-            let tm = broken_down(seconds, true);
+            let Some(tm) = broken_down(seconds, true) else {
+                return "--:--:--".into();
+            };
             format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
         }
     }
 }
 
-fn broken_down(seconds: i64, local: bool) -> libc::tm {
+fn broken_down(seconds: i64, local: bool) -> Option<libc::tm> {
     let time: libc::time_t = seconds;
+    // SAFETY: `tm` is plain data; localtime_r/gmtime_r write into it and
+    // report failure through a null return, which the caller handles.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe {
+    let result = unsafe {
         if local {
-            libc::localtime_r(&time, &mut tm);
+            libc::localtime_r(&time, &mut tm)
         } else {
-            libc::gmtime_r(&time, &mut tm);
+            libc::gmtime_r(&time, &mut tm)
         }
-    }
-    tm
+    };
+    (!result.is_null()).then_some(tm)
 }
 
 #[cfg(test)]

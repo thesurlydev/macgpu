@@ -46,6 +46,22 @@ impl Default for SourceSet {
 /// A source result. Errors are kept as strings so snapshots stay `Clone`.
 pub type SourceResult<T> = Result<T, String>;
 
+/// Keeps the full error chain in a source's detail string.
+fn error_detail(error: impl std::fmt::Display) -> String {
+    format!("{error:#}")
+}
+
+/// Takes a sample from a cached reader, preserving its construction error.
+fn read_cached<T, R>(
+    reader: &mut SourceResult<T>,
+    read: impl FnOnce(&mut T) -> SourceResult<R>,
+) -> SourceResult<R> {
+    match reader {
+        Ok(reader) => read(reader),
+        Err(error) => Err(error.clone()),
+    }
+}
+
 /// Cumulative counters from every enabled source at one instant.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -74,16 +90,6 @@ pub struct Snapshot {
     pub process_cpu_ns: u64,
 }
 
-impl Snapshot {
-    /// GPU-client PIDs in this snapshot.
-    pub fn gpu_pids(&self) -> BTreeSet<i32> {
-        match &self.registry {
-            Ok(registry) => registry.clients().map(|client| client.pid).collect(),
-            Err(_) => BTreeSet::new(),
-        }
-    }
-}
-
 /// Holds every reader and its long-lived state (subscriptions, connections,
 /// caches). Readers hold CoreFoundation objects, so a `Sampler` stays on the
 /// thread that created it.
@@ -91,10 +97,10 @@ pub struct Sampler {
     sources: SourceSet,
     registry: RegistryReader,
     processes: ProcessCache,
-    ioreport: Option<Result<IoReportReader, String>>,
+    ioreport: Option<SourceResult<IoReportReader>>,
     coalitions: Option<CoalitionReader>,
     memory: Option<MemoryReader>,
-    smc: Option<Result<SmcReader, String>>,
+    smc: Option<SourceResult<SmcReader>>,
     frequencies: Option<FrequencyTable>,
     firmware_readings: Vec<PerformanceStatistics>,
 }
@@ -107,12 +113,12 @@ impl Sampler {
             processes: ProcessCache::new(),
             ioreport: sources
                 .ioreport
-                .then(|| IoReportReader::new().map_err(|error| format!("{error:#}"))),
+                .then(|| IoReportReader::new().map_err(error_detail)),
             coalitions: sources.coalitions.then(CoalitionReader::new),
             memory: sources.memory.then(MemoryReader::new),
             smc: sources
                 .temperature
-                .then(|| SmcReader::new().map_err(|error| format!("{error:#}"))),
+                .then(|| SmcReader::new().map_err(error_detail)),
             frequencies: if sources.ioreport {
                 gpu_freq::read()
             } else {
@@ -123,22 +129,19 @@ impl Sampler {
     }
 
     /// Takes one cheap firmware utilization reading between snapshots. The
-    /// readings are averaged into the next report.
+    /// readings are averaged into the next report. A failed poll is recorded
+    /// by the next snapshot's full registry read, in `Snapshot::registry`.
     pub fn poll_firmware(&mut self) {
         if let Ok(readings) = self.registry.read_performance() {
             self.firmware_readings.extend(readings);
         }
     }
 
-    pub fn sources(&self) -> SourceSet {
-        self.sources
-    }
-
     pub fn snapshot(&mut self) -> Snapshot {
         let started = Instant::now();
         let started_cpu = clock::thread_cpu_ns();
 
-        let registry = self.registry.read().map_err(|error| format!("{error:#}"));
+        let registry = self.registry.read().map_err(error_detail);
         // The window boundary is the registry read: AppUsage is the primary
         // counter, and later sources (notably SMC) can take several ms.
         let at = Instant::now();
@@ -169,19 +172,19 @@ impl Sampler {
         }
         self.processes.retain(&|pid| processes.contains_key(&pid));
 
-        let ioreport = self.ioreport.as_mut().map(|reader| match reader {
-            Ok(reader) => reader.sample().map_err(|error| format!("{error:#}")),
-            Err(error) => Err(error.clone()),
-        });
+        let ioreport = self
+            .ioreport
+            .as_mut()
+            .map(|reader| read_cached(reader, |reader| reader.sample().map_err(error_detail)));
         let coalitions = self
             .coalitions
             .as_mut()
-            .map(|reader| reader.read(&gpu_pids).map_err(|error| format!("{error:#}")));
+            .map(|reader| reader.read(&gpu_pids).map_err(error_detail));
         let memory = self.memory.as_mut().map(|reader| reader.read(&gpu_pids));
-        let temperatures = self.smc.as_mut().map(|reader| match reader {
-            Ok(reader) => reader.read().map_err(|error| format!("{error:#}")),
-            Err(error) => Err(error.clone()),
-        });
+        let temperatures = self
+            .smc
+            .as_mut()
+            .map(|reader| read_cached(reader, |reader| reader.read().map_err(error_detail)));
         let system = self.sources.system.then(system::read);
 
         Snapshot {

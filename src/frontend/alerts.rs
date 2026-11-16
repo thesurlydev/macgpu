@@ -8,7 +8,7 @@
 //! and exports them.
 
 use crate::format;
-use crate::model::{DeviceView, EventKind, Report};
+use crate::model::{EventKind, Report};
 use crate::view::{self, Filter, Group};
 use anyhow::{Result, anyhow};
 use clap::Args;
@@ -327,7 +327,7 @@ impl DeviceMetric {
             Self::TempMax => device.temperature.as_ref().map(|t| t.max_c),
             Self::Memory => device.memory.in_use_bytes.map(|bytes| bytes as f64),
             Self::Busy => Some(report.totals.attributed_ms_per_s),
-            Self::Limited => limited_pct(device),
+            Self::Limited => device.limited_pct(),
         }
     }
 }
@@ -351,12 +351,6 @@ impl RowMetric {
             Self::Memory => Unit::Bytes,
         }
     }
-}
-
-/// Share of the window under a power or thermal limiter state. See
-/// [`DeviceView::limited_pct`].
-pub fn limited_pct(device: &DeviceView) -> Option<f64> {
-    device.limited_pct()
 }
 
 struct Observed {
@@ -623,7 +617,8 @@ pub fn parse_duration(text: &str) -> Result<f64, String> {
 mod tests {
     use super::*;
     use crate::model::{
-        AppView, Event, FirmwareUtilization, ProcessView, StateShare, Temperature, Totals,
+        AppView, DeviceView, Event, FirmwareUtilization, ProcessView, StateShare, Temperature,
+        Totals,
     };
 
     fn rule(text: &str) -> Rule {
@@ -883,7 +878,7 @@ mod tests {
     #[test]
     fn limited_combines_controller_and_thermal() {
         let mut device = DeviceView::default();
-        assert_eq!(limited_pct(&device), None);
+        assert_eq!(device.limited_pct(), None);
         let state = |name: &str, pct: f64| StateShare {
             name: name.into(),
             pct,
@@ -897,17 +892,17 @@ mod tests {
             state("FAST_DIE", 5.0),
         ];
         // Limiter residency without GPUPH active time cannot be placed in the window.
-        assert_eq!(limited_pct(&device), None);
+        assert_eq!(device.limited_pct(), None);
         // 45% of powered time, powered half the window.
         device.active_pct = Some(50.0);
-        assert_eq!(limited_pct(&device), Some(22.5));
+        assert_eq!(device.limited_pct(), Some(22.5));
         device.thermal_limited_pct = Some(30.0);
-        assert_eq!(limited_pct(&device), Some(30.0));
+        assert_eq!(device.limited_pct(), Some(30.0));
         // IOReport working, GPU off the whole window: a real 0.
         device.limiters.clear();
         device.active_pct = Some(0.0);
         device.thermal_limited_pct = None;
-        assert_eq!(limited_pct(&device), Some(0.0));
+        assert_eq!(device.limited_pct(), Some(0.0));
         assert!(crate::model::is_limiting_state(" ppmlimit "));
         assert!(!crate::model::is_limiting_state("IDLE_OFF"));
     }

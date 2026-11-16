@@ -4,6 +4,7 @@ members = [".", "crates/macgpu-core", "crates/macgpu-model"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+publish = false
 license = "MIT"
 repository = "https://github.com/thesurlydev/macgpu"
 rust-version = "1.99.1"
@@ -28,6 +29,7 @@ categories = ["cli", "system", "monitoring"]
 keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
 readme = "README.md"
 rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true

@@ -28,21 +28,17 @@
 //!   a window's worth (31.8 W for one app against 17.2 W device). When
 //!   IOReport's GPU power is known, the apps' power is therefore scaled to sum
 //!   to it, and the coalition energies decide only the split.
-//! - The kernel credits coalition GPU energy in steps about 0.5 s apart, for
-//!   every coalition at once (M4 Max, macOS 27: 60 steps in 30 s, 0.49-0.51 s
-//!   apart), so most windows shorter than that see no energy for any app.
-//!   Splitting each window by its own energy lost that window's device energy:
-//!   at 0.25 s windows the apps summed to 49% of IOReport's energy, and
-//!   `macgpu run` at 0.1 s reported a fifth of a load's energy. The split
-//!   therefore uses the coalition energy of a trailing span of at least
-//!   [`ENERGY_SPAN_NS`] (see [`EnergyHistory`]), which always contains a step;
+//! - Coalition GPU energy is credited in steps about 0.5 s apart for every
+//!   coalition at once, so most windows shorter than that see no energy for
+//!   any app. The split uses the coalition energy of a trailing span of at
+//!   least [`ENERGY_SPAN_NS`] (see [`EnergyHistory`]), which contains a step;
 //!   a window that long is split by its own energy alone. Before the first
 //!   step is seen the device energy is split by apportioned GPU time.
 //! - A process's GPU power is an estimate: the app's measured GPU power split
 //!   by the process's share of the app's apportioned time (exited tasks keep
 //!   theirs when known).
 
-use super::{ms_per_s, pct};
+use super::{NS_PER_S, ms_per_s, pct, saturating_sum};
 use crate::snapshot::Snapshot;
 use crate::sys::coalition::{Coalition, CoalitionTable, CoalitionUsage};
 use crate::sys::process::{ProcessInfo, bundle_name};
@@ -53,7 +49,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// Largest difference between coalition and `AppUsage` time seen in windows
 /// without exits or overlap: the two counters are credited at slightly
 /// different moments. A smaller gap is not reported as exited time.
-pub const SKEW_TOLERANCE_NS: u64 = 15_000_000;
+const SKEW_TOLERANCE_NS: u64 = 15_000_000;
 
 /// Without the device's busy time, the overlap-ratio estimate of unattributed
 /// time is reported only when it can be off by at most this fraction of it
@@ -73,14 +69,14 @@ pub const ENERGY_SPAN_NS: u64 = 900_000_000;
 /// one window to the next by [`super::Analyzer`]: as few windows, ending with
 /// the current one, as cover [`ENERGY_SPAN_NS`].
 #[derive(Debug, Clone, Default)]
-pub struct EnergyHistory {
+pub(super) struct EnergyHistory {
     /// Oldest first: each window's length and its coalitions' nonzero GPU
     /// energy, in nanojoules.
     windows: VecDeque<(u64, Vec<(u64, u64)>)>,
 }
 
 impl EnergyHistory {
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.windows.clear();
     }
 
@@ -99,9 +95,7 @@ impl EnergyHistory {
     }
 
     fn span_ns(&self) -> u64 {
-        self.windows.iter().fold(0u64, |total, (window_ns, _)| {
-            total.saturating_add(*window_ns)
-        })
+        saturating_sum(self.windows.iter().map(|(window_ns, _)| *window_ns))
     }
 
     /// Each coalition's GPU energy over the span.
@@ -254,6 +248,55 @@ fn from_coalitions(
     report: &mut Report,
 ) {
     let baseline = coalitions(previous);
+    let members = collect_members(previous, current, table, report);
+    let deltas = window_deltas(table, baseline);
+
+    // The energy that splits this window: the trailing span's.
+    let energy = table.has_gpu_energy && baseline.is_some();
+    if energy {
+        let moved = deltas
+            .iter()
+            .filter(|(_, delta)| delta.gpu_energy_nj > 0)
+            .map(|(id, delta)| (*id, delta.gpu_energy_nj))
+            .collect();
+        history.push(window_ns, moved);
+    } else {
+        history.clear();
+    }
+    let span_energy_nj = history.energy_nj();
+    let input = AppInput {
+        table,
+        baseline,
+        members: &members,
+        deltas: &deltas,
+        span_energy_nj: &span_energy_nj,
+    };
+    let span_ns = history.span_ns();
+
+    let included = select_apps(&input, include_idle, window_ns, report);
+    build_app_views(
+        current, &input, window_ns, energy, span_ns, included, report,
+    );
+}
+
+/// The current window's coalition facts, shared by the selection and view steps.
+struct AppInput<'a> {
+    table: &'a CoalitionTable,
+    baseline: Option<&'a CoalitionTable>,
+    members: &'a HashMap<u64, Members>,
+    deltas: &'a HashMap<u64, CoalitionUsage>,
+    span_energy_nj: &'a HashMap<u64, u64>,
+}
+
+/// Assigns each process to its coalition and collects the live-client facts
+/// used to detect exited work and to name apps.
+fn collect_members(
+    previous: &Snapshot,
+    current: &Snapshot,
+    table: &CoalitionTable,
+    report: &mut Report,
+) -> HashMap<u64, Members> {
+    let baseline = coalitions(previous);
     let mut members: HashMap<u64, Members> = HashMap::new();
     for (index, process) in report.processes.iter_mut().enumerate() {
         process.coalition_id = table.coalition_of(process.pid);
@@ -262,7 +305,7 @@ fn from_coalitions(
         };
         let app = members.entry(id).or_default();
         app.processes.push(index);
-        app.attributed_ns = app.attributed_ns.saturating_add(process.gpu_ns);
+        app.attributed_ns = saturating_sum([app.attributed_ns, process.gpu_ns].into_iter());
         app.active_clients += process
             .clients
             .iter()
@@ -286,9 +329,16 @@ fn from_coalitions(
             }
         }
     }
+    members
+}
 
-    // Window deltas. Without a baseline there are none.
-    let deltas: HashMap<u64, CoalitionUsage> = table
+/// Window deltas from the previous coalition table. Without a baseline there
+/// are none, and every coalition's lifetime counters stand on their own.
+fn window_deltas(
+    table: &CoalitionTable,
+    baseline: Option<&CoalitionTable>,
+) -> HashMap<u64, CoalitionUsage> {
+    table
         .iter()
         .map(|coalition| {
             let delta = match baseline {
@@ -300,33 +350,41 @@ fn from_coalitions(
             };
             (coalition.id, delta)
         })
-        .collect();
+        .collect()
+}
 
-    // The energy that splits this window: the trailing span's.
-    let energy = table.has_gpu_energy && baseline.is_some();
-    if energy {
-        let moved = deltas
-            .iter()
-            .filter(|(_, delta)| delta.gpu_energy_nj > 0)
-            .map(|(id, delta)| (*id, delta.gpu_energy_nj))
-            .collect();
-        history.push(window_ns, moved);
-    } else {
-        history.clear();
-    }
-    let span_energy_nj = history.energy_nj();
-    let span_ns = history.span_ns();
+/// Chooses the apps to show, apportions their time, and assigns exited time.
+fn select_apps<'a>(
+    input: &AppInput<'a>,
+    include_idle: bool,
+    window_ns: u64,
+    report: &Report,
+) -> Vec<Included<'a>> {
+    let AppInput {
+        table,
+        baseline,
+        members,
+        deltas,
+        span_energy_nj,
+    } = input;
     let span_energy = |id: u64| span_energy_nj.get(&id).copied().unwrap_or(0);
-
-    let empty = Members::default();
+    // A coalition with no current member process still gets a row when it has
+    // energy or in-flight time; this stands in for its missing live facts.
+    static EMPTY: Members = Members {
+        processes: Vec::new(),
+        attributed_ns: 0,
+        active_clients: 0,
+        client_vanished: false,
+    };
+    let empty = &EMPTY;
     let evidence = |id: u64| {
-        let app = members.get(&id).unwrap_or(&empty);
+        let app = members.get(&id).unwrap_or(empty);
         deltas.get(&id).is_some_and(|delta| delta.tasks_exited > 0) || app.client_vanished
     };
     // Overlap measured on apps whose gap cannot contain exited work, for the
     // fallback estimate.
     let (mut reference_coalition, mut reference_usage) = (0u64, 0u64);
-    for (id, app) in &members {
+    for (id, app) in *members {
         if app.attributed_ns > 0 && !evidence(*id) {
             reference_coalition += deltas.get(id).map(|delta| delta.gpu_ns).unwrap_or(0);
             reference_usage += app.attributed_ns;
@@ -340,7 +398,7 @@ fn from_coalitions(
     let mut included = Vec::new();
     for coalition in table.iter() {
         let delta = deltas.get(&coalition.id).copied().unwrap_or_default();
-        let app = members.get(&coalition.id).unwrap_or(&empty);
+        let app = members.get(&coalition.id).unwrap_or(empty);
         let active = delta.gpu_ns > 0
             || delta.gpu_energy_nj > 0
             || delta.gpu_energy_billed_to_me_nj > 0
@@ -383,10 +441,7 @@ fn from_coalitions(
         .device
         .active_pct
         .map(|active| (active / 100.0 * window_ns as f64).clamp(0.0, window_ns as f64) as u64);
-    let live_ns = report
-        .processes
-        .iter()
-        .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
+    let live_ns = saturating_sum(report.processes.iter().map(|process| process.gpu_ns));
     match active_ns {
         Some(active_ns) => apportion_exited(&mut included, active_ns, live_ns),
         None => {
@@ -402,25 +457,42 @@ fn from_coalitions(
         }
     }
     cap_unattributed(&mut included, window_ns);
-    let total_ns = included
-        .iter()
-        .fold(0u64, |total, entry| total.saturating_add(entry.gpu_ns));
+    included
+}
+
+/// Builds one app row per selected app and records the unattributed total.
+fn build_app_views<'a>(
+    current: &Snapshot,
+    input: &AppInput<'a>,
+    window_ns: u64,
+    energy: bool,
+    span_ns: u64,
+    included: Vec<Included<'a>>,
+    report: &mut Report,
+) {
+    let AppInput {
+        table,
+        baseline,
+        span_energy_nj,
+        ..
+    } = input;
+    let span_energy = |id: u64| span_energy_nj.get(&id).copied().unwrap_or(0);
+    let total_ns = saturating_sum(included.iter().map(|entry| entry.gpu_ns));
 
     // Pass 2: the views.
-    let window_seconds = window_ns as f64 / 1e9;
-    let watts = |nj: u64| nj as f64 / 1e9 / window_seconds;
+    let window_seconds = window_ns as f64 / NS_PER_S;
+    let watts = |nj: u64| nj as f64 / NS_PER_S / window_seconds;
     let ane = table.has_ane && baseline.is_some();
     // Coalition energy over the trailing span decides the split; IOReport's GPU
     // energy, when known, the total (coalition energy trails it by about a
     // second). Before any coalition energy is seen, apportioned GPU time splits
     // it. Without IOReport, the span's coalition energy at its average rate.
-    let span_total_nj = included.iter().fold(0u64, |total, entry| {
-        total.saturating_add(span_energy(entry.coalition.id))
-    });
+    let span_total_nj =
+        saturating_sum(included.iter().map(|entry| span_energy(entry.coalition.id)));
     let device_nj = report
         .device
         .power_w
-        .map(|watts| watts * window_seconds * 1e9);
+        .map(|watts| watts * window_seconds * NS_PER_S);
     let energy_nj_of = |id: u64, gpu_ns: u64| match device_nj {
         Some(device_nj) if span_total_nj > 0 => {
             device_nj * span_energy(id) as f64 / span_total_nj as f64
@@ -447,7 +519,7 @@ fn from_coalitions(
             None => partial = baseline.is_some(),
         }
         let energy_nj = energy_nj_of(coalition.id, gpu_ns);
-        let power_w = energy.then(|| energy_nj / 1e9 / window_seconds);
+        let power_w = energy.then(|| energy_nj / NS_PER_S / window_seconds);
         if let Some(power_w) = power_w {
             // Split by apportioned time; exited tasks keep their known share.
             for index in &app.processes {
@@ -494,7 +566,7 @@ fn from_coalitions(
             in_flight_ms_per_s: baseline.map(|_| ms_per_s(delta.gpu_ns, window_ns)),
             attributed_gpu_ns: app.attributed_ns,
             unattributed_gpu_ns: unattributed_ns,
-            energy_j: energy.then(|| energy_nj / 1e9),
+            energy_j: energy.then(|| energy_nj / NS_PER_S),
             power_w,
             billed_to_me_w: energy.then(|| watts(delta.gpu_energy_billed_to_me_nj)),
             billed_to_others_w: energy.then(|| watts(delta.gpu_energy_billed_to_others_nj)),
@@ -503,7 +575,7 @@ fn from_coalitions(
             lifetime_gpu_ns: coalition.usage.gpu_ns,
             lifetime_energy_j: table
                 .has_gpu_energy
-                .then(|| coalition.usage.gpu_energy_nj as f64 / 1e9),
+                .then(|| coalition.usage.gpu_energy_nj as f64 / NS_PER_S),
             graphics_memory_bytes,
             members: coalition.members.len(),
             gpu_pids,
@@ -647,23 +719,29 @@ fn app_name(coalition: &Coalition, leader: Option<&ProcessInfo>) -> (String, Opt
 /// and grouping-level switches link processes to their app row just as kernel
 /// coalitions do. Energy and exited time are unknown.
 fn from_bundles(window_ns: u64, include_idle: bool, report: &mut Report) {
-    // The synthetic id per process, keyed by `.app` bundle (or by the process
-    // when it has none). Setting `process.coalition_id` links every process to
-    // its app row exactly as kernel coalitions do, so the tree view, the app
-    // detail breakdown, and level switches all work with bundle grouping.
+    // The synthetic id and display name per process, keyed by `.app` bundle
+    // (or by the process when it has none). Setting `process.coalition_id`
+    // links every process to its app row as kernel coalitions do.
+    let mut labels: HashMap<u64, (String, Option<String>)> = HashMap::new();
     let ids: Vec<u64> = report
         .processes
         .iter()
         .map(|process| {
-            let key = match process
+            let bundle_path = process
                 .path
                 .as_deref()
                 .and_then(crate::sys::process::bundle_path)
-            {
-                Some(bundle) => bundle.to_string(),
-                None => format!("pid {} {}", process.pid, process.start_us),
+                .map(str::to_string);
+            let (name, bundle_path) = match &bundle_path {
+                Some(bundle) => (bundle_name(bundle).to_string(), Some(bundle.clone())),
+                None => (process.name.clone(), None),
             };
-            synthetic_id(&key)
+            let key = bundle_path
+                .clone()
+                .unwrap_or_else(|| format!("pid {} {}", process.pid, process.start_us));
+            let id = synthetic_id(&key);
+            labels.entry(id).or_insert((name, bundle_path));
+            id
         })
         .collect();
     for (process, id) in report.processes.iter_mut().zip(&ids) {
@@ -674,42 +752,31 @@ fn from_bundles(window_ns: u64, include_idle: bool, report: &mut Report) {
     for (process, id) in report.processes.iter().zip(&ids) {
         groups.entry(*id).or_default().push(process);
     }
-    let total_ns = report
-        .processes
-        .iter()
-        .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
+    let total_ns = saturating_sum(report.processes.iter().map(|process| process.gpu_ns));
 
     for (id, processes) in groups {
-        let gpu_ns = processes
-            .iter()
-            .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
+        let gpu_ns = saturating_sum(processes.iter().map(|process| process.gpu_ns));
         if gpu_ns == 0 && !include_idle {
             continue;
         }
-        let bundle = processes[0]
-            .path
-            .as_deref()
-            .and_then(crate::sys::process::bundle_path);
-        let name = match bundle {
-            Some(bundle) => bundle_name(bundle).to_string(),
-            None => processes[0].name.clone(),
-        };
+        let (name, bundle_path) = &labels[&id];
+        let share_pct = pct(gpu_ns, total_ns);
         report.apps.push(AppView {
             coalition_id: id,
-            name,
-            bundle_path: bundle.map(str::to_string),
+            name: name.clone(),
+            bundle_path: bundle_path.clone(),
             responsible_pid: None,
             gpu_ns,
             busy_ms_per_s: ms_per_s(gpu_ns, window_ns),
-            share_pct: pct(gpu_ns, total_ns),
+            share_pct,
             device_pct: report
                 .device
                 .active_pct
-                .map(|active| pct(gpu_ns, total_ns) * active / 100.0),
+                .map(|active| share_pct * active / 100.0),
             attributed_gpu_ns: gpu_ns,
-            lifetime_gpu_ns: processes.iter().fold(0u64, |total, process| {
-                total.saturating_add(process.lifetime_gpu_ns)
-            }),
+            lifetime_gpu_ns: saturating_sum(
+                processes.iter().map(|process| process.lifetime_gpu_ns),
+            ),
             graphics_memory_bytes: processes
                 .iter()
                 .filter_map(|process| process.graphics_memory_bytes)
@@ -719,7 +786,6 @@ fn from_bundles(window_ns: u64, include_idle: bool, report: &mut Report) {
             ..AppView::default()
         });
     }
-    report.unattributed = None;
 }
 
 /// A stable key for a bundle group: FNV-1a of `key` with the high bit set, so

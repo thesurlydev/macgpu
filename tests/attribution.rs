@@ -168,7 +168,7 @@ fn within_bounds(label: &str, report: &Report, pid: i32, truth: &LoadResult) -> 
 /// over one window spanning the whole load, matches the load's own timing as
 /// far as other GPU work allows.
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
 fn per_process_gpu_time_matches_load_measurement() {
     let _lock = gpu_lock();
     let config = LoadConfig {
@@ -251,7 +251,7 @@ fn per_process_gpu_time_matches_load_measurement() {
 /// whole window, but `AppUsage` splits the GPU between them, so the sum over
 /// every process stays within one GPU.
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
 fn concurrent_loads_share_one_gpu() {
     let _lock = gpu_lock();
     let config = LoadConfig {
@@ -323,7 +323,7 @@ fn concurrent_loads_share_one_gpu() {
 /// [`UNCONTENDED_SHARE`] of the GPU; beyond that each duty is checked against
 /// the contention floor instead.
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
 fn load_share_scales_with_duty_cycle() {
     let _lock = gpu_lock();
     // The previous quiet step's duty and rate.
@@ -387,7 +387,7 @@ fn ceiling_ns(window_ns: u64, queues: usize) -> u64 {
 
 /// The pre-fix diff from section 4.1 of the plan: per client, summed over
 /// queues, and a decrease credited the client's whole remaining lifetime.
-fn old_client_delta(previous: Option<&GpuClient>, current: &GpuClient) -> u64 {
+fn lifetime_client_delta(previous: Option<&GpuClient>, current: &GpuClient) -> u64 {
     match previous {
         Some(previous) if current.accumulated_ns() >= previous.accumulated_ns() => {
             current.accumulated_ns() - previous.accumulated_ns()
@@ -412,7 +412,7 @@ fn client_of(snapshot: &Snapshot, pid: i32) -> Option<&GpuClient> {
 /// lifetime; the queue-aligned diff never credits more than is possible and
 /// its total tracks the load's own measurement.
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients and a Metal load; not available on CI VMs"]
 fn queue_churn_never_over_credits() {
     let _lock = gpu_lock();
     const QUEUES: usize = 2;
@@ -489,7 +489,8 @@ fn queue_churn_never_over_credits() {
         let window_ns = (report.window_seconds * 1e9) as u64;
         let ceiling = ceiling_ns(window_ns, QUEUES);
         let new = gpu_ns_of(&report, pid);
-        let old = old_client_delta(client_of(&pair[0], pid), client_of(&pair[1], pid).unwrap());
+        let old =
+            lifetime_client_delta(client_of(&pair[0], pid), client_of(&pair[1], pid).unwrap());
         assert!(
             new <= ceiling,
             "macgpu credited {:.1} ms in a {:.1} ms window with {QUEUES} queues",
@@ -511,7 +512,7 @@ fn queue_churn_never_over_credits() {
     );
     assert!(
         old_over > 0,
-        "the old diff never over-credited, so this test no longer reproduces section 4.1"
+        "the lifetime-sized diff never over-credited, so this test no longer reproduces section 4.1"
     );
 
     // A released queue loses at most its last partial window: up to one
@@ -571,7 +572,7 @@ fn queue_churn_never_over_credits() {
 
 /// The observing macgpu process must not become a GPU client itself.
 #[test]
-#[ignore]
+#[ignore = "needs visible GPU clients; not available on CI VMs"]
 fn observer_holds_no_gpu_client() {
     let mut child = Command::new(MACGPU)
         .args(["--json", "--count", "3", "--interval", "0.5"])
@@ -597,7 +598,7 @@ fn observer_holds_no_gpu_client() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs real GPU, IOReport and SMC sources; not available on CI VMs"]
 fn doctor_json_reports_every_source() {
     let output = Command::new(MACGPU)
         .args(["doctor", "--json"])
@@ -640,7 +641,7 @@ fn doctor_json_reports_every_source() {
 /// available are skipped, so this holds before and after every reader lands;
 /// once they do, it verifies power, coalitions, and memory too.
 #[test]
-#[ignore]
+#[ignore = "needs real GPU hardware and a Metal load; not available on CI VMs"]
 fn doctor_load_passes() {
     let _lock = gpu_lock();
     let output = Command::new(MACGPU)

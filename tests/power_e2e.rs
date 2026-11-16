@@ -11,22 +11,9 @@ mod common;
 use common::*;
 use macgpu::analyze::{AnalyzeOptions, analyze};
 use macgpu::metal_load::LoadConfig;
-use macgpu::model::{Report, SourceState, source};
+use macgpu::model::{Report, source};
 use macgpu::snapshot::{Sampler, SourceSet};
 use std::time::Duration;
-
-fn require(report: &Report, name: &str) {
-    let status = report
-        .sources
-        .get(name)
-        .unwrap_or_else(|| panic!("source {name} not reported"));
-    assert!(
-        matches!(status.state, SourceState::Ok | SourceState::Partial),
-        "source {name} is {:?} ({}); this test needs its reader",
-        status.state,
-        status.detail.as_deref().unwrap_or("")
-    );
-}
 
 /// Idle-baseline activity above which another process was loading the GPU.
 const BUSY_BASELINE_PCT: f64 = 50.0;
@@ -68,7 +55,7 @@ fn idle_and_load_once(config: &LoadConfig) -> (Report, Report, f64) {
 /// Active residency and power rise under load; residency is integrated over
 /// the window, so it covers at least the time the load kept the GPU busy.
 #[test]
-#[ignore]
+#[ignore = "needs real IOReport power readings and a Metal load; not available on CI VMs"]
 fn active_residency_and_power_rise_under_load() {
     let _lock = gpu_lock();
     let (idle, load, busy_pct) = idle_and_load(&LoadConfig {
@@ -123,7 +110,7 @@ fn active_residency_and_power_rise_under_load() {
 
 /// GPU temperature is reported, plausible, and does not fall under load.
 #[test]
-#[ignore]
+#[ignore = "needs real SMC temperature sensors and a Metal load; not available on CI VMs"]
 fn temperature_is_reported_under_load() {
     let _lock = gpu_lock();
     let (idle, load, _) = idle_and_load(&LoadConfig {

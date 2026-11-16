@@ -17,7 +17,7 @@ use crate::model::{
     SourceStatus, StateShare, SystemView, Temperature, Totals, Unattributed, source,
 };
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
@@ -29,15 +29,12 @@ const PSTATE_MHZ: [f64; 15] = [
     1326.0, 1470.0, 1578.0,
 ];
 
-/// A synthetic feed. `paced` feeds wait for the interval like a live engine;
-/// unpaced feeds return a report on every call (for tests).
+/// A synthetic feed that returns a report on every call (for tests).
 pub struct SyntheticFeed {
     step: u64,
     interval: Duration,
     include_idle: bool,
-    paced: bool,
     live: bool,
-    due: Option<Instant>,
     limit: Option<u64>,
 }
 
@@ -48,19 +45,8 @@ impl SyntheticFeed {
             step: 0,
             interval: Duration::from_secs(1),
             include_idle: false,
-            paced: false,
             live: true,
-            due: None,
             limit: None,
-        }
-    }
-
-    /// Emits one report per interval, like the live engine.
-    pub fn paced(interval: Duration) -> Self {
-        Self {
-            interval,
-            paced: true,
-            ..Self::unpaced()
         }
     }
 
@@ -72,28 +58,12 @@ impl SyntheticFeed {
             ..Self::unpaced()
         }
     }
-
-    pub fn include_idle(mut self, include_idle: bool) -> Self {
-        self.include_idle = include_idle;
-        self
-    }
 }
 
 impl ReportFeed for SyntheticFeed {
-    fn next_report(&mut self, timeout: Duration) -> FeedEvent {
+    fn next_report(&mut self, _timeout: Duration) -> FeedEvent {
         if self.limit.is_some_and(|limit| self.step >= limit) {
             return FeedEvent::End;
-        }
-        if self.paced {
-            let now = Instant::now();
-            let due = *self.due.get_or_insert(now + self.interval);
-            if now < due {
-                std::thread::sleep((due - now).min(timeout));
-                if Instant::now() < due {
-                    return FeedEvent::Timeout;
-                }
-            }
-            self.due = Some(due + self.interval);
         }
         self.step += 1;
         FeedEvent::Report(Box::new(report(
@@ -112,7 +82,6 @@ impl ReportFeed for SyntheticFeed {
             return false;
         }
         self.interval = interval;
-        self.due = None;
         true
     }
 
@@ -136,7 +105,7 @@ struct Spec {
     memory: Option<u64>,
     /// `(registry_id, [(api, fraction of the process's time)])`.
     clients: &'static [(u64, &'static [(&'static str, f64)])],
-    busy: fn(f64, u64) -> f64,
+    busy: fn(f64) -> f64,
     /// Steps during which the process exists, if limited.
     alive: Option<(u64, u64)>,
 }
@@ -158,7 +127,7 @@ const SPECS: &[Spec] = &[
             ),
             (0x1000_0b3f, &[("Metal", 0.15)]),
         ],
-        busy: |t, _| {
+        busy: |t| {
             35.0 + 15.0 * (t / 7.0).sin()
                 + if (t as u64).is_multiple_of(17) {
                     40.0
@@ -178,7 +147,7 @@ const SPECS: &[Spec] = &[
         start_s: 7_200,
         memory: Some(642 * MIB),
         clients: &[(0x1000_2c40, &[("Metal", 0.8), ("Metal", 0.2)])],
-        busy: |t, _| 70.0 + 40.0 * (t / 11.0).sin(),
+        busy: |t| 70.0 + 40.0 * (t / 11.0).sin(),
         alive: None,
     },
     Spec {
@@ -191,7 +160,7 @@ const SPECS: &[Spec] = &[
         start_s: 7_260,
         memory: Some(38 * MIB),
         clients: &[(0x1000_2b10, &[("Metal", 1.0)])],
-        busy: |_, _| 0.0,
+        busy: |_| 0.0,
         alive: None,
     },
     Spec {
@@ -204,7 +173,7 @@ const SPECS: &[Spec] = &[
         start_s: 30,
         memory: Some(3 * MIB),
         clients: &[(0x1000_7a01, &[("Metal", 1.0)])],
-        busy: |_, _| 30.0,
+        busy: |_| 30.0,
         alive: Some((8, 12)),
     },
     Spec {
@@ -217,7 +186,7 @@ const SPECS: &[Spec] = &[
         start_s: 1_800,
         memory: Some(18 * GIB + 400 * MIB),
         clients: &[(0x1000_3e02, &[("Metal", 0.52), ("Metal", 0.48)])],
-        busy: |t, _| {
+        busy: |t| {
             if t % 40.0 < 24.0 {
                 450.0 + 60.0 * t.sin()
             } else {
@@ -236,7 +205,7 @@ const SPECS: &[Spec] = &[
         start_s: 4_000,
         memory: Some(210 * MIB),
         clients: &[(0x1000_2f88, &[("Metal", 1.0)])],
-        busy: |t, _| 8.0 + 5.0 * (t / 3.0).sin(),
+        busy: |t| 8.0 + 5.0 * (t / 3.0).sin(),
         alive: None,
     },
     Spec {
@@ -249,7 +218,7 @@ const SPECS: &[Spec] = &[
         start_s: 20_000,
         memory: Some(96 * MIB),
         clients: &[(0x1000_1a00, &[("Metal", 1.0)])],
-        busy: |t, _| 3.0 + 2.0 * (t / 2.0).sin(),
+        busy: |t| 3.0 + 2.0 * (t / 2.0).sin(),
         alive: None,
     },
     Spec {
@@ -262,7 +231,7 @@ const SPECS: &[Spec] = &[
         start_s: 10,
         memory: Some(9 * GIB + 200 * MIB),
         clients: &[(0x1000_6c00, &[("Metal", 1.0)])],
-        busy: |t, _| {
+        busy: |t| {
             if t >= 20.0 {
                 240.0 + 50.0 * (t / 5.0).sin()
             } else {
@@ -281,7 +250,7 @@ const SPECS: &[Spec] = &[
         start_s: 86_000,
         memory: Some(12 * MIB),
         clients: &[(0x1000_0640, &[("Metal", 1.0)])],
-        busy: |_, _| 0.0,
+        busy: |_| 0.0,
         alive: None,
     },
 ];
@@ -314,7 +283,7 @@ fn busy_at(spec: &Spec, step: u64, seconds_per_step: f64) -> f64 {
     if !alive(spec, step) {
         return 0.0;
     }
-    (spec.busy)(step as f64 * seconds_per_step, step).max(0.0)
+    (spec.busy)(step as f64 * seconds_per_step).max(0.0)
 }
 
 /// The synthetic report for `step` (1-based).
@@ -625,7 +594,6 @@ pub fn report(step: u64, interval: Duration, include_idle: bool) -> Report {
                 in_use_bytes: Some(in_use),
                 allocated_bytes: Some(in_use + in_use / 7),
                 wired_limit_bytes: Some(96 * GIB),
-                recommended_working_set_bytes: Some(96 * GIB),
                 total_physical_bytes: Some(128 * GIB),
             },
             system: SystemView {
@@ -719,14 +687,5 @@ mod tests {
             FeedEvent::Report(_)
         ));
         assert!(matches!(feed.next_report(Duration::ZERO), FeedEvent::End));
-    }
-
-    #[test]
-    fn paced_feed_times_out_before_interval() {
-        let mut feed = SyntheticFeed::paced(Duration::from_secs(5));
-        assert!(matches!(
-            feed.next_report(Duration::ZERO),
-            FeedEvent::Timeout
-        ));
     }
 }

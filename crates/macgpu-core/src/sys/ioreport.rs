@@ -19,22 +19,22 @@ use core_foundation_sys::array::{
     CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef,
     kCFTypeArrayCallBacks,
 };
-use core_foundation_sys::base::{CFEqual, CFTypeRef, kCFAllocatorDefault};
+use core_foundation_sys::base::{CFEqual, CFHash, CFTypeRef, kCFAllocatorDefault};
 use core_foundation_sys::dictionary::{
     CFDictionaryCreateMutableCopy, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
     CFMutableDictionaryRef,
 };
-use core_foundation_sys::string::{CFStringGetCStringPtr, CFStringRef, kCFStringEncodingUTF8};
+use core_foundation_sys::string::CFStringRef;
 use std::ffi::c_void;
 
 type IoReportSubscriptionRef = *const c_void;
 
 #[link(name = "IOReport", kind = "dylib")]
 unsafe extern "C" {
-    fn IOReportCopyAllChannels(a: u64, b: u64) -> CFDictionaryRef;
+    fn IOReportCopyAllChannels(group_id: u64, channel_id: u64) -> CFDictionaryRef;
     fn IOReportCreateSubscription(
         allocator: *const c_void,
-        desired: CFMutableDictionaryRef,
+        desired_channels: CFMutableDictionaryRef,
         subscribed: *mut CFMutableDictionaryRef,
         channel_id: u64,
         options: CFTypeRef,
@@ -60,6 +60,17 @@ unsafe extern "C" {
 /// `IOReportChannelGetFormat` values.
 const FORMAT_SIMPLE: i32 = 1;
 const FORMAT_STATE: i32 = 2;
+
+/// `IOReportCopyAllChannels`: every group.
+const ALL_GROUPS: u64 = 0;
+/// `IOReportCopyAllChannels`: every channel in those groups.
+const ALL_CHANNELS: u64 = 0;
+/// `IOReportCreateSubscription`: let IOReport assign the channel ID.
+const AUTO_CHANNEL_ID: u64 = 0;
+/// Null selects IOReport's default allocator.
+const DEFAULT_ALLOCATOR: *const c_void = std::ptr::null();
+/// Null selects IOReport's default options.
+const DEFAULT_OPTIONS: CFTypeRef = std::ptr::null();
 
 /// Key of the channel array in IOReport channel and sample dictionaries.
 const CHANNELS_KEY: &str = "IOReportChannels";
@@ -227,14 +238,6 @@ impl Channel {
             _ => None,
         }
     }
-
-    /// Cumulative value of a simple channel.
-    pub fn simple(&self) -> Option<u64> {
-        match self.value {
-            ChannelValue::Simple(value) => value,
-            _ => None,
-        }
-    }
 }
 
 /// Converts an energy delta in the channel's unit to joules. `None` for an
@@ -261,14 +264,15 @@ pub struct IoReportReader {
 }
 
 /// A channel's identity and converted strings, reused while the channel at the
-/// same position keeps the same driver, channel ID, format, and state count.
-/// Converting the strings again on every sample would cost several times more
-/// than the sample itself.
+/// same position keeps the same driver, channel ID, format, state count and
+/// state names. Hashing the CFString names detects a rename without converting
+/// the strings on every sample.
 struct Metadata {
     driver_id: u64,
     channel_id: u64,
     format: i32,
     state_count: i32,
+    state_names_hash: u64,
     channel: Channel,
 }
 
@@ -276,16 +280,19 @@ impl IoReportReader {
     pub fn new() -> Result<Self> {
         let desired = desired_channels()?;
         let mut subscribed: CFMutableDictionaryRef = std::ptr::null_mut();
+        // SAFETY: the allocator and options are null by contract, the input dictionary is owned by `desired`, and the output pointer is valid; both returned references are owned by `Owned`.
         let subscription = unsafe {
             IOReportCreateSubscription(
-                std::ptr::null(),
+                DEFAULT_ALLOCATOR,
                 desired.as_ptr() as CFMutableDictionaryRef,
                 &mut subscribed,
-                0,
-                std::ptr::null(),
+                AUTO_CHANNEL_ID,
+                DEFAULT_OPTIONS,
             )
         };
+        // SAFETY: the create rule returns a +1 reference that `Owned` releases on drop.
         let subscribed = unsafe { Owned::from_create(subscribed as CFTypeRef) };
+        // SAFETY: the create rule returns a +1 reference that `Owned` releases on drop.
         let subscription = unsafe { Owned::from_create(subscription) };
         match (subscription, subscribed) {
             (Some(subscription), Some(subscribed)) => Ok(Self {
@@ -299,6 +306,7 @@ impl IoReportReader {
 
     pub fn sample(&mut self) -> Result<IoReportSample> {
         let taken_at_ns = clock::mach_now_ns();
+        // SAFETY: both dictionaries are owned references from `new`, and the returned samples dictionary is owned by `Owned`.
         let samples = unsafe {
             Owned::from_create(IOReportCreateSamples(
                 self.subscription.as_ptr(),
@@ -309,6 +317,7 @@ impl IoReportReader {
         let Some(samples) = samples else {
             bail!("IOReportCreateSamples returned null");
         };
+        // SAFETY: `samples` is a valid dictionary returned by `IOReportCreateSamples` and still owned here.
         let channels = unsafe { self.convert_channels(samples.as_ptr() as CFDictionaryRef) };
         Ok(IoReportSample {
             taken_at_ns,
@@ -323,16 +332,20 @@ impl IoReportReader {
     /// # Safety
     /// `samples` must be a valid samples dictionary from `IOReportCreateSamples`.
     unsafe fn convert_channels(&mut self, samples: CFDictionaryRef) -> Vec<Channel> {
+        // SAFETY: `samples` is an owned, valid samples dictionary.
         let Some(array) = (unsafe { channel_array(samples) }) else {
             return Vec::new();
         };
+        // SAFETY: `array` is a valid CFArray owned by the samples dictionary.
         let count = usize::try_from(unsafe { CFArrayGetCount(array) }).unwrap_or(0);
         let mut channels = Vec::with_capacity(count);
         for index in 0..count {
+            // SAFETY: `index` came from `CFArrayGetCount`, and `array` stays alive while it is read.
             let item = unsafe { CFArrayGetValueAtIndex(array, index as isize) } as CFDictionaryRef;
             if item.is_null() {
                 continue;
             }
+            // SAFETY: `item` is a valid channel dictionary from the samples array.
             let (driver_id, channel_id, format) = unsafe {
                 (
                     IOReportChannelGetDriverID(item),
@@ -341,7 +354,16 @@ impl IoReportReader {
                 )
             };
             let state_count = if format == FORMAT_STATE {
+                // SAFETY: `item` is a valid state channel dictionary from the samples array.
                 unsafe { IOReportStateGetCount(item) }.max(0)
+            } else {
+                0
+            };
+            // State names can change while the count stays fixed, so include
+            // their cheap CFString hash in the cache key.
+            let names_hash = if format == FORMAT_STATE {
+                // SAFETY: `item` is a valid state channel dictionary with `state_count` states.
+                unsafe { state_names_hash(item, state_count) }
             } else {
                 0
             };
@@ -350,16 +372,20 @@ impl IoReportReader {
                     && metadata.channel_id == channel_id
                     && metadata.format == format
                     && metadata.state_count == state_count
+                    && metadata.state_names_hash == names_hash
             });
             let channel = match cached {
+                // SAFETY: `item` has the cached format and state count, checked above.
                 Some(metadata) => unsafe { refresh_values(&metadata.channel, item) },
                 None => {
+                    // SAFETY: `item` is a valid channel dictionary from the samples array.
                     let channel = unsafe { convert_channel(item) };
                     let metadata = Metadata {
                         driver_id,
                         channel_id,
                         format,
                         state_count,
+                        state_names_hash: names_hash,
                         channel: channel.clone(),
                     };
                     if index < self.metadata.len() {
@@ -380,19 +406,22 @@ impl IoReportReader {
 /// Builds the subscription request: the channels of [`SUBSCRIPTIONS`] in one
 /// `IOReportChannels` array.
 ///
-/// One `IOReportCopyAllChannels` call (about 46 ms on an M4 Max) is cheaper than
-/// one `IOReportCopyChannelsInGroup` per subgroup (about 40 ms each, because
-/// each call walks every driver). Groups are compared as CFStrings first, so
-/// only the few hundred channels of the two wanted groups are converted.
+/// One `IOReportCopyAllChannels` call enumerates every group and channel.
+/// Groups are compared as CFStrings first, so only channels of the two wanted
+/// groups are converted to Rust strings.
 fn desired_channels() -> Result<Owned> {
-    let Some(all) = (unsafe { Owned::from_create(IOReportCopyAllChannels(0, 0) as CFTypeRef) })
-    else {
+    // SAFETY: zero selects every group and channel; the +1 dictionary reference is owned by `Owned`.
+    let Some(all) = (unsafe {
+        Owned::from_create(IOReportCopyAllChannels(ALL_GROUPS, ALL_CHANNELS) as CFTypeRef)
+    }) else {
         bail!("IOReportCopyAllChannels returned null");
     };
+    // SAFETY: `all` owns a valid channel dictionary.
     let Some(array) = (unsafe { channel_array(all.as_ptr() as CFDictionaryRef) }) else {
         bail!("IOReport returned no channel list");
     };
     let groups = [cf::cfstring(GPU_STATS), cf::cfstring(ENERGY_MODEL)];
+    // SAFETY: all CF objects here are valid, `selected` owns its +1 array and dictionary references, and IOReport channel strings stay alive while `all` is in scope.
     unsafe {
         let selected =
             Owned::from_create(
@@ -414,11 +443,13 @@ fn desired_channels() -> Result<Owned> {
             {
                 continue;
             }
-            if wanted(
-                &trimmed_string(group),
-                &trimmed_string(IOReportChannelGetSubGroup(item)),
-                &trimmed_string(IOReportChannelGetChannelName(item)),
-            ) {
+            // The channel strings are borrowed from `all`, which is still owned here.
+            let strings = (
+                cf::cfstring_to_string(group),
+                cf::cfstring_to_string(IOReportChannelGetSubGroup(item)),
+                cf::cfstring_to_string(IOReportChannelGetChannelName(item)),
+            );
+            if wanted(strings.0.trim(), strings.1.trim(), strings.2.trim()) {
                 CFArrayAppendValue(selected.as_ptr() as _, item as *const c_void);
             }
         }
@@ -450,6 +481,7 @@ fn desired_channels() -> Result<Owned> {
 /// `dictionary` must be a valid `CFDictionaryRef`.
 unsafe fn channel_array(dictionary: CFDictionaryRef) -> Option<CFArrayRef> {
     let key = cf::cfstring(CHANNELS_KEY);
+    // SAFETY: `dictionary` is valid and `key` stays alive for the borrow, whose result is used before either goes away.
     let array =
         unsafe { CFDictionaryGetValue(dictionary, key.as_concrete_TypeRef() as *const c_void) };
     (!array.is_null()).then_some(array as CFArrayRef)
@@ -462,18 +494,20 @@ unsafe fn channel_array(dictionary: CFDictionaryRef) -> Option<CFArrayRef> {
 /// state count as `template`.
 unsafe fn refresh_values(template: &Channel, item: CFDictionaryRef) -> Channel {
     let value = match &template.value {
-        ChannelValue::Simple(_) => ChannelValue::Simple(non_negative(unsafe {
-            IOReportSimpleGetIntegerValue(item, 0)
-        })),
+        ChannelValue::Simple(_) => ChannelValue::Simple(non_negative(
+            // SAFETY: `item` is a valid simple channel dictionary from the samples array.
+            unsafe { IOReportSimpleGetIntegerValue(item, 0) },
+        )),
         ChannelValue::State(states) => ChannelValue::State(
             states
                 .iter()
                 .enumerate()
                 .map(|(index, state)| StateResidency {
                     name: state.name.clone(),
-                    residency: non_negative(unsafe {
-                        IOReportStateGetResidency(item, index as i32)
-                    }),
+                    residency: non_negative(
+                        // SAFETY: `index` is within the cached state count of this valid channel dictionary.
+                        unsafe { IOReportStateGetResidency(item, index as i32) },
+                    ),
                 })
                 .collect(),
         ),
@@ -488,8 +522,10 @@ unsafe fn refresh_values(template: &Channel, item: CFDictionaryRef) -> Channel {
 /// # Safety
 /// `item` must be a valid IOReport channel dictionary.
 unsafe fn convert_channel(item: CFDictionaryRef) -> Channel {
+    // SAFETY: the caller guarantees a valid channel dictionary whose borrowed CFStrings outlive this call.
     unsafe {
-        let text = |string: CFStringRef| trimmed_string(string);
+        // IOReport string references are valid while the sample dictionary is owned.
+        let text = |string: CFStringRef| cf::cfstring_to_string(string).trim().to_string();
         let value = match IOReportChannelGetFormat(item) {
             FORMAT_SIMPLE => {
                 ChannelValue::Simple(non_negative(IOReportSimpleGetIntegerValue(item, 0)))
@@ -525,23 +561,25 @@ unsafe fn convert_channel(item: CFDictionaryRef) -> Channel {
     }
 }
 
-/// Copies a borrowed CFString, trimming padding. Most IOReport strings are
-/// stored as ASCII, so this reads the internal C string directly and only falls
-/// back to a full conversion when CoreFoundation cannot expose one.
+/// Cheap hash of a state channel's names, from CFString's own hash.
 ///
 /// # Safety
-/// `string` must be null or a valid `CFStringRef`.
-unsafe fn trimmed_string(string: CFStringRef) -> String {
-    if string.is_null() {
-        return String::new();
+/// `item` must be a valid state channel dictionary with `state_count` states.
+unsafe fn state_names_hash(item: CFDictionaryRef, state_count: i32) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for index in 0..state_count {
+        // SAFETY: `index` is within the state count of this valid channel dictionary.
+        let name = unsafe { IOReportStateGetNameForIndex(item, index) };
+        let code = if name.is_null() {
+            0
+        } else {
+            // SAFETY: `name` is a valid CFString borrowed from the channel dictionary.
+            let value = unsafe { CFHash(name as CFTypeRef) };
+            value as u64
+        };
+        hash = (hash ^ code).wrapping_mul(1_099_511_628_211u64);
     }
-    let pointer = unsafe { CFStringGetCStringPtr(string, kCFStringEncodingUTF8) };
-    if !pointer.is_null()
-        && let Ok(text) = unsafe { std::ffi::CStr::from_ptr(pointer) }.to_str()
-    {
-        return text.trim().to_string();
-    }
-    unsafe { cf::cfstring_to_string(string) }.trim().to_string()
+    hash
 }
 
 /// IOReport marks invalid values with a negative sentinel (`INT64_MIN`).
@@ -687,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs Apple Silicon hardware and the IOReport dylib"]
     fn samples_live_gpu_channels() {
         let mut reader = IoReportReader::new().expect("subscribe to IOReport");
         let first = reader.sample().expect("first sample");

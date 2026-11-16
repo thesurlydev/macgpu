@@ -15,7 +15,7 @@ use macgpu::frontend::doctor::coalition_gpu_energy_j;
 use macgpu::metal_load::{
     LoadConfig, LoadProcess, OVER_TOLERANCE_PCT, QUIET_SHARE, SLACK_NS, TOLERANCE_PCT,
 };
-use macgpu::model::{AppView, ProcessView, Report, SourceState, source};
+use macgpu::model::{AppView, ProcessView, Report, source};
 use macgpu::snapshot::{Sampler, SourceSet};
 use std::path::Path;
 use std::time::Duration;
@@ -29,19 +29,6 @@ const ENERGY_SETTLE: Duration = Duration::from_secs(2);
 const ENERGY_LAG: Duration = Duration::from_millis(1500);
 /// Settled coalition energy against IOReport, with quiet window edges.
 const ENERGY_TOLERANCE_PCT: f64 = 2.0;
-
-fn require(report: &Report, name: &str) {
-    let status = report
-        .sources
-        .get(name)
-        .unwrap_or_else(|| panic!("source {name} not reported"));
-    assert!(
-        matches!(status.state, SourceState::Ok | SourceState::Partial),
-        "source {name} is {:?} ({}); this test needs its reader",
-        status.state,
-        status.detail.as_deref().unwrap_or("")
-    );
-}
 
 fn process(report: &Report, pid: i32) -> Option<&ProcessView> {
     report.processes.iter().find(|process| process.pid == pid)
@@ -70,7 +57,7 @@ fn app_of(report: &Report, coalition_id: u64) -> Option<&AppView> {
 /// resource coalition keeps it: in flight, and in the app row as apportioned
 /// unattributed time when it can be separated from overlapping work.
 #[test]
-#[ignore]
+#[ignore = "needs real GPU hardware and a Metal load; not available on CI VMs"]
 fn exited_process_time_is_kept_by_coalition() {
     let _lock = gpu_lock();
     const INTERVAL: Duration = Duration::from_secs(1);
@@ -226,7 +213,7 @@ fn exited_process_time_is_kept_by_coalition() {
 /// while the coalition counts work in flight, so the two agree only on a
 /// quiet GPU, and there `AppUsage` reads a few percent above the coalition.
 #[test]
-#[ignore]
+#[ignore = "needs real GPU hardware and a Metal load; not available on CI VMs"]
 fn coalition_time_covers_load() {
     let _lock = gpu_lock();
     let mut child = spawn_held(&LoadConfig {
@@ -299,7 +286,7 @@ fn coalition_time_covers_load() {
 /// processes start or stop GPU work they are not, so the tolerance adds the
 /// difference between the two edges' IOReport energy.
 #[test]
-#[ignore]
+#[ignore = "needs real IOReport and coalition hardware readings; not available on CI VMs"]
 fn coalition_energy_matches_ioreport() {
     let _lock = gpu_lock();
     let mut misses = Vec::new();
@@ -363,7 +350,7 @@ const ENERGY_INTERVALS_MS: [u64; 4] = [100, 250, 500, 1000];
 /// among the apps, so the sum holds whatever else uses the GPU; only windows
 /// in which nothing used the GPU keep their (idle) energy unattributed.
 #[test]
-#[ignore]
+#[ignore = "needs real IOReport and coalition hardware readings; not available on CI VMs"]
 fn app_energy_matches_device_energy_at_every_interval() {
     let _lock = gpu_lock();
     let mut child = spawn_held(&LoadConfig {
@@ -443,7 +430,7 @@ const RUN_ENERGY_TOLERANCE: f64 = 0.2;
 /// edges fall, so the two figures differ by up to about 1 s of 8 (4 s loads
 /// differed by up to 13%), hence [`RUN_ENERGY_TOLERANCE`].
 #[test]
-#[ignore]
+#[ignore = "needs real GPU energy readings and a Metal load; not available on CI VMs"]
 fn run_energy_does_not_depend_on_interval() {
     let _lock = gpu_lock();
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("apps-run-energy");
@@ -491,7 +478,7 @@ fn run_energy_does_not_depend_on_interval() {
 /// Measured before the child submits any GPU work: right after a load the
 /// footprint carries about 160 MiB more, freed 1-2 s after the last submission.
 #[test]
-#[ignore]
+#[ignore = "needs real GPU hardware and a Metal buffer; not available on CI VMs"]
 fn graphics_memory_of_one_gib_buffer() {
     const GIB: u64 = 1 << 30;
     let child = spawn_held(&LoadConfig {

@@ -100,6 +100,7 @@ pub unsafe fn to_value(object: CFTypeRef) -> Value {
     if object.is_null() {
         return Value::Other;
     }
+    // SAFETY: the caller guarantees `object` is null or valid for this call, and borrowed values are copied before it goes away.
     unsafe {
         let type_id = CFGetTypeID(object);
         if type_id == CFNumberGetTypeID() {
@@ -156,6 +157,7 @@ pub unsafe fn to_value(object: CFTypeRef) -> Value {
 /// `dictionary` must be a valid `CFDictionaryRef`.
 pub unsafe fn dictionary_to_map(dictionary: CFDictionaryRef) -> BTreeMap<String, Value> {
     let mut map = BTreeMap::new();
+    // SAFETY: the caller guarantees a valid dictionary; keys and values are borrowed only while it is alive.
     unsafe {
         let count = usize::try_from(CFDictionaryGetCount(dictionary)).unwrap_or(0);
         if count == 0 {
@@ -182,6 +184,7 @@ pub unsafe fn cfstring_to_string(string: CFStringRef) -> String {
     if string.is_null() {
         return String::new();
     }
+    // SAFETY: the caller guarantees a valid CFString; wrapping under get rule does not take ownership.
     unsafe { CFString::wrap_under_get_rule(string).to_string() }
 }
 
@@ -206,12 +209,14 @@ impl Owned {
     }
 
     pub fn to_value(&self) -> Value {
+        // SAFETY: `Owned` keeps its CF object alive for the duration of the conversion.
         unsafe { to_value(self.0) }
     }
 }
 
 impl Drop for Owned {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is an owned +1 reference released exactly once here.
         unsafe { CFRelease(self.0) };
     }
 }
@@ -250,6 +255,7 @@ mod tests {
             ),
         ]);
         let array = CFArray::from_CFTypes(&[entry.as_CFType()]);
+        // SAFETY: the test's CFArray is alive and owns a valid CFTypeRef for the conversion.
         let value = unsafe { to_value(array.as_CFTypeRef()) };
 
         let entries = value.as_array().expect("array");

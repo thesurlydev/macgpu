@@ -6,6 +6,34 @@
 //! `run`, forwards the signal to the child.
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
+
+/// How long a front end waits for a sample before checking for a signal again.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// What a signal-aware receive produced.
+#[derive(Debug)]
+pub enum Recv<T> {
+    Item(T),
+    Timeout,
+    Stop,
+    Disconnected,
+}
+
+/// Receives one item, checking for a termination signal first.
+pub fn recv_or_stop<T>(
+    mut receive: impl FnMut(Duration) -> Result<T, RecvTimeoutError>,
+) -> Recv<T> {
+    if take().is_some() {
+        return Recv::Stop;
+    }
+    match receive(POLL_INTERVAL) {
+        Ok(item) => Recv::Item(item),
+        Err(RecvTimeoutError::Timeout) => Recv::Timeout,
+        Err(RecvTimeoutError::Disconnected) => Recv::Disconnected,
+    }
+}
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 static SENDER: AtomicI32 = AtomicI32::new(0);
@@ -27,6 +55,8 @@ extern "C" fn record(signal: libc::c_int, info: *mut libc::siginfo_t, _context: 
     let sender = if info.is_null() {
         0
     } else {
+        // SAFETY: the kernel supplied a valid `siginfo_t` for this SA_SIGINFO
+        // delivery; `si_pid` is plain data read in the handler.
         unsafe { (*info).si_pid }
     };
     SENDER.store(sender, Ordering::SeqCst);
@@ -37,6 +67,9 @@ extern "C" fn record(signal: libc::c_int, info: *mut libc::siginfo_t, _context: 
 /// (termination) so the caller decides what to do.
 pub fn install(signals: &[i32]) {
     for &signal in signals {
+        // SAFETY: `action` is zero-initialized, its mask is initialized by
+        // sigemptyset, and `record` is a valid handler. These signals are
+        // always valid, so sigaction cannot fail; the old action is unneeded.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = record as *const () as usize;
@@ -83,6 +116,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "no delivery carried this process's PID"
             );
+            // SAFETY: SIGUSR2 is a valid signal and the target is this process.
             unsafe { libc::kill(libc::getpid(), libc::SIGUSR2) };
             // Another test thread may take delivery, asynchronously.
             let poll_until = std::time::Instant::now() + std::time::Duration::from_millis(100);

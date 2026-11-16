@@ -9,11 +9,26 @@
 
 use macgpu::frontend::doctor::GpuLoadLock;
 use macgpu::metal_load::{LoadConfig, LoadProcess};
+use macgpu::model::{Report, SourceState};
 use macgpu::sys::iokit::{GpuClient, RegistryReader};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 pub const MACGPU: &str = env!("CARGO_BIN_EXE_macgpu");
+
+/// Fails when a report's named source is not usable for a test's assertions.
+pub fn require(report: &Report, name: &str) {
+    let status = report
+        .sources
+        .get(name)
+        .unwrap_or_else(|| panic!("source {name} not reported"));
+    assert!(
+        matches!(status.state, SourceState::Ok | SourceState::Partial),
+        "source {name} is {:?} ({}); this test needs its reader",
+        status.state,
+        status.detail.as_deref().unwrap_or("")
+    );
+}
 
 /// Held while a test generates GPU load.
 pub struct GpuLock {

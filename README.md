@@ -4,15 +4,14 @@ See how the Apple Silicon GPU is being used, and by which processes and apps.
 
 ## Why macgpu?
 
-MacOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the depth required for performance tuning and power analysis. `macgpu` fills this gap by providing:
+macOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the depth required for performance tuning and power analysis. `macgpu` fills this gap by providing:
 
 - **Detailed Power & Thermals**: Track actual GPU wattage and die temperature in real-time.
 - **App-Level Attribution**: Group GPU usage by resource coalitions, so you see the total impact of an app (including its helpers) rather than a fragmented list of processes.
 - **Developer Tooling**: Measure the GPU impact of specific commands with `run`, record sessions for later analysis, and export metrics to Prometheus.
 - **Architectural Insight**: Identify GPU throttling via limiter states and see the breakdown of firmware utilization (renderer vs. tiler).
-- **Zero Interference**: Designed to be invisible to the GPU driver, ensuring that the act of monitoring doesn't skew the results.
+- **Zero Interference**: The sampler does not open a Metal device, so it does not appear as a GPU client and skew the results.
 
-## ![screenshot](assets/screenshot.png)
 
 ## Use Cases
 
@@ -26,10 +25,13 @@ MacOS's Activity Monitor provides a basic GPU usage percentage, but it lacks the
 - **Metal App Debugging**: Drill down to the `queue` level to see how different command buffers in your application are distributed across the GPU.
 
 `macgpu` reads the GPU driver's per-client counters, kernel resource
-coalitions, IOReport, and the SMC directly. It needs no sudo, does not spawn
-`ioreg` or `powermetrics`, and does not open a Metal device, so it never shows
-up as a GPU client itself. A full sample of every source takes about 5 ms of
-CPU; the interactive view at a 1 s interval uses about 0.6% of one core.
+coalitions, IOReport, and the SMC directly. The sampling path needs no sudo,
+spawns no subprocesses, and does not open a Metal device, so it never shows up
+as a GPU client itself. `macgpu doctor --load` is the one exception: with sudo
+credentials already cached, it also runs `sudo -n powermetrics` as a
+cross-check, and never prompts for a password. A full sample of every source
+takes about 5 ms of CPU; the interactive view at a 1 s interval uses about 0.6%
+of one core.
 
 ## Quick start
 
@@ -46,15 +48,27 @@ On a terminal, bare `macgpu` opens the interactive view. When output is piped,
 or with `--once`, `--watch`, `--count`, or `--json`, it prints a table or JSON
 instead.
 
-## Requirements
+## Install
 
-- macOS on Apple Silicon.
-- Rust 1.99.1 or newer to build (edition 2024).
+```sh
+cargo install --git https://github.com/thesurlydev/macgpu
+```
+
+Tagged releases also include a prebuilt `macgpu-macos-arm64.tar.gz` for Apple
+Silicon, with a matching `.sha256` checksum. To build from a checkout:
 
 ```sh
 cargo build --release
-mise run install   # build if needed, then install to ~/.local/bin
+mise run install   # builds the release binary, then installs it to ~/.local/bin
 ```
+
+## Requirements
+
+- macOS on Apple Silicon only. Tested on an M4 Max with macOS 27; macOS 26 and
+  other chips are not verified.
+- The readers use private IOReport, SMC, and kernel coalition interfaces that
+  Apple does not document, so an OS or chip change can affect them.
+- Rust 1.99.1 or newer to build (edition 2024).
 
 ## What it shows
 
@@ -179,21 +193,42 @@ PID is never signaled.
 | `-i, --interval <SECONDS>` | Sampling window. Default 1, or 2 for a single printed table. |
 | `-1, --once` | Print one table and exit, even on a terminal. |
 | `-w, --watch` | Refresh the table until Ctrl-C. |
-| `-c, --count <N>` | Number of samples. 0 means unlimited. |
+| `-c, --count <N>` | Number of samples. Defaults to 1, or unlimited with `--watch`. 0 means unlimited. |
 | `-n, --top <N>` | Show the top N active rows. Default 15; 0 shows all. |
-| `-a, --all` | Include idle processes and add a lifetime column. |
+| `-a, --all` | Include idle processes and add a lifetime column. Ignores `--top`. |
 | `-v, --verbose` | Show full executable paths. |
 | `-j, --json` | Emit JSON; one object per line with `--watch` or `--count`. |
 | `-g, --group <LEVEL>` | `queue`, `client`, `process`, or `app`. |
 | `-f, --filter <EXPR>` | Comma-separated substrings of name, path, or PID; prefix `!` to exclude. Example: `"chrome, !helper"`. |
-| `-p, --pid <PID>` | Only these PIDs. |
+| `-p, --pid <PID>` | Only these PIDs, repeatable or comma-separated. |
 | `--disable <SOURCE>` | Turn off `power`, `apps`, `memory`, `temperature`, or `system`. |
+| `--readonly` | Disable sending signals in the interactive view. |
+| `--alert <RULE>` | Repeatable alert rule; see "Alerts" below. |
+| `--exit-on-alert` | Exit with status 3 when an alert fires (printed and log modes). |
+| `-h`, `-V` | Help and version. |
 
 The JSON schema carries a `schema_version`, every device and row field above,
 per-source status (`ok`, `partial`, `stale`, `denied`, `unavailable`,
 `disabled`, with a reason), events, and `macgpu`'s own overhead.
 
 ## Subcommands
+
+Each subcommand has more flags than the shared ones above. `macgpu <subcommand>
+--help` is authoritative; the main omissions are:
+
+| Subcommand | Additional flags |
+|---|---|
+| `log` | `-s, --select <TYPES>` (default `device rows events`), `--csv`, `-o, --output <FILE>`, `--append`, `-c, --count <N>`, `-d, --duration <DURATION>`, `-t, --time <FORMAT>` (default `iso`), `-a, --all`, `-n, --top <N>` (default 0, all), `-v, --verbose`, `--no-header`, `--alert`, `--exit-on-alert` |
+| `serve` | `-l, --listen <ADDR>` (default `127.0.0.1:10060`), `-n, --top <N>` (default 0, all), `-a, --all`, `--series <LEVELS>` (default `process app`), `-f, --filter <EXPR>` |
+| `record` | `-o, --output <FILE>` (required; `-` for stdout), `-c, --count <N>`, `-d, --duration <DURATION>`, `-a, --all` (about ten times larger) |
+| `replay` | `--speed <SPEED>`, `--fast`, `--print`, `-j, --json`, `-g, --group`, `-f, --filter`, `-p, --pid`, `-n, --top` (default 15), `-a, --all`, `-v, --verbose`, `--alert`, `--exit-on-alert` |
+| `run` | `-i, --interval <SECONDS>` (default 0.1), `-j, --json` (on stderr), `-o, --output <FILE>`, `-q, --quiet` |
+| `doctor` | `--load`, `--load-seconds <SECONDS>` (default 3), `-j, --json` |
+| `top` | The shared sampling and selection flags, plus `--all`, `--readonly`, and the alert flags |
+
+All live-sampling commands accept `-i, --interval <SECONDS>` and
+`--disable <SOURCE>`. Most also accept `-g, --group`, `-f, --filter`, and
+`-p, --pid`; `serve` has `--filter` and its own `--series` instead.
 
 ### `log`: one line per row per sample
 
@@ -213,11 +248,15 @@ macgpu serve                       # 127.0.0.1:10060
 macgpu serve --listen 0.0.0.0:10060 --top 20
 ```
 
+The endpoint is unauthenticated and exposes process names and executable paths.
+Only bind beyond loopback on a trusted network.
+
 Endpoints: `/metrics` (Prometheus text format), `/report.json` (the latest
 report), and `/healthz` (200 when samples are fresh, 503 otherwise). Process
 series carry `pid`, `process`, `app`, and `coalition` labels; app series carry
 `app` and `coalition`. Only processes and apps that used the GPU since the
-exporter started are exported, so label cardinality stays bounded.
+exporter started are exported; `--all` includes idle ones and `--top` caps how
+many series are exported, so label cardinality stays bounded.
 
 ### `record` and `replay`
 
@@ -246,7 +285,8 @@ forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT to it.
 
 The command runs in the terminal's app coalition (creating a separate
 coalition needs privileges), so its energy is the app's measured GPU energy
-split by GPU time.
+apportioned by GPU time, or whole-GPU energy apportioned by GPU time when
+per-app energy is unavailable.
 
 ### `doctor`: check the data sources
 
@@ -257,8 +297,10 @@ macgpu doctor --load
 
 Reports whether each source exists, works without root, and is updating, then
 runs sanity checks. `--load` also runs a short Metal workload in a child
-process and checks per-process, per-app, power, memory, frequency, and
-temperature readings against it.
+process (length set by `--load-seconds`, default 3) and checks per-process,
+per-app, power, memory, frequency, and temperature readings against it. If
+sudo credentials are already cached, it also uses `sudo -n powermetrics` to
+cross-check residency, power, and clocks; it never prompts for a password.
 
 ## Alerts
 
@@ -293,6 +335,11 @@ Every source works without root.
 | sysctl and notify | Thermal pressure, memory pressure, GPU wired-memory limit | |
 
 `macgpu doctor` shows the state of each source on the current machine.
+
+IOReport channel metadata is read from each sample because subscriptions can
+drop or reorder channels, and coalition time and energy come from undocumented
+`coalition_info_resource_usage` counter slots. These private interfaces are why
+a new chip or macOS release may need new source checks.
 
 ## Accuracy and limitations
 
@@ -342,12 +389,13 @@ Another program can link `macgpu-core` to sample in-process, or depend on
 `macgpu-model` alone to read reports from `macgpu serve` or a recording on any
 platform.
 
-The end-to-end tests in `tests/` generate real GPU load through the hidden
-`macgpu __load` subcommand and check readings against invariants that hold
-even when other work shares the GPU. They take about a minute. Tests that
-need real GPU hardware are marked `#[ignore]`, because CI runs on macOS
-virtual machines that have no IOReport power, SMC sensors, or visible GPU
-clients. On an Apple Silicon Mac, run them too:
+The hardware end-to-end tests in `tests/` generate real GPU load through the
+hidden `macgpu __load` subcommand and check readings against invariants that
+hold even when other work shares the GPU. They take about a minute. Tests that
+need real GPU hardware or a visible GPU client are marked `#[ignore]`, because
+CI runs on macOS virtual machines that have no IOReport power, SMC sensors, or
+visible GPU clients. The default test suite covers the CLI paths without
+loading the GPU. On an Apple Silicon Mac, run the ignored tests too:
 
 ```sh
 cargo test --workspace -- --include-ignored

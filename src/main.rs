@@ -1,7 +1,9 @@
+//! `macgpu` entry point: parses the CLI and dispatches to a front end.
+
 use clap::Parser;
 use macgpu::cli::{Cli, Command, ViewArgs};
 use macgpu::engine::Engine;
-use macgpu::frontend::{self, alerts::Alerts, tui};
+use macgpu::frontend::{self, tui};
 use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
@@ -20,14 +22,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         None => run_default(&cli.view),
         Some(Command::Top(args)) => {
+            if args.alerts.exit_on_alert {
+                anyhow::bail!("--exit-on-alert is not supported by top; use a printed mode");
+            }
             let engine = Engine::start(args.sampling.engine_config(1.0, args.all));
-            let options = tui::TuiOptions {
-                group: args.selection.group,
-                filter: args.selection.filter(),
-                include_idle: args.all,
-                readonly: args.readonly,
-                alerts: Alerts::from_args(&args.alerts)?,
-            };
+            let options = args.tui_options()?;
             tui::run(Box::new(engine), options)?;
             Ok(0)
         }
@@ -49,13 +48,7 @@ fn run_default(args: &ViewArgs) -> anyhow::Result<i32> {
         return frontend::table::run(args);
     }
     let engine = Engine::start(args.sampling.engine_config(1.0, args.all));
-    let options = tui::TuiOptions {
-        group: args.selection.group,
-        filter: args.selection.filter(),
-        include_idle: args.all,
-        readonly: args.readonly,
-        alerts: Alerts::from_args(&args.alerts)?,
-    };
+    let options = args.tui_options()?;
     tui::run(Box::new(engine), options)?;
     Ok(0)
 }

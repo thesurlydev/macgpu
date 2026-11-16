@@ -1,18 +1,20 @@
 //! Command-line interface.
 
 use crate::analyze::AnalyzeOptions;
-use crate::engine::EngineConfig;
+use crate::engine::{EngineConfig, MAX_INTERVAL, MIN_INTERVAL};
+pub(crate) use crate::frontend::run::RunArgs;
 use crate::frontend::{
-    alerts::AlertArgs,
+    alerts::{AlertArgs, Alerts},
     doctor::DoctorArgs,
     log::LogArgs,
     record::{RecordArgs, ReplayArgs},
-    run::RunArgs,
     serve::ServeArgs,
+    tui::TuiOptions,
 };
-use crate::metal_load::LoadConfig;
+use crate::metal_load::{LoadConfig, SUBCOMMAND};
 use crate::snapshot::SourceSet;
 use crate::view::{Filter, Group};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::time::Duration;
 
@@ -55,7 +57,7 @@ pub enum Command {
     /// Check every data source on this machine and report what works.
     Doctor(DoctorArgs),
     /// Internal: run a controlled Metal load in this process (used by doctor and tests).
-    #[command(name = "__load", hide = true)]
+    #[command(name = SUBCOMMAND, hide = true)]
     Load(LoadConfig),
 }
 
@@ -184,7 +186,17 @@ pub struct ViewArgs {
 impl ViewArgs {
     /// True when the user asked for printed output rather than the interactive view.
     pub fn wants_printed_output(&self) -> bool {
-        self.once || self.watch || self.count.is_some() || self.json
+        self.once || self.watch || self.count.is_some() || self.json || self.alerts.exit_on_alert
+    }
+
+    pub fn tui_options(&self) -> Result<TuiOptions> {
+        tui_options(
+            self.selection.group,
+            self.selection.filter(),
+            self.all,
+            self.readonly,
+            &self.alerts,
+        )
     }
 }
 
@@ -209,15 +221,46 @@ pub struct TopArgs {
     pub alerts: AlertArgs,
 }
 
+impl TopArgs {
+    pub fn tui_options(&self) -> Result<TuiOptions> {
+        tui_options(
+            self.selection.group,
+            self.selection.filter(),
+            self.all,
+            self.readonly,
+            &self.alerts,
+        )
+    }
+}
+
+/// Builds interactive-view options once for every command that opens the TUI.
+pub(crate) fn tui_options(
+    group: Group,
+    filter: Filter,
+    include_idle: bool,
+    readonly: bool,
+    alerts: &AlertArgs,
+) -> Result<TuiOptions> {
+    Ok(TuiOptions {
+        group,
+        filter,
+        include_idle,
+        readonly,
+        alerts: Alerts::from_args(alerts)?,
+    })
+}
+
 pub fn parse_interval(value: &str) -> Result<f64, String> {
     let interval: f64 = value
         .parse()
         .map_err(|_| "interval must be a number".to_string())?;
-    if !interval.is_finite() || interval < 0.1 {
-        return Err("interval must be at least 0.1 seconds".to_string());
+    let minimum = MIN_INTERVAL.as_secs_f64();
+    let maximum = MAX_INTERVAL.as_secs_f64();
+    if !interval.is_finite() || interval < minimum {
+        return Err(format!("interval must be at least {minimum} seconds"));
     }
-    if interval > 3600.0 {
-        return Err("interval must be at most 3600 seconds".to_string());
+    if interval > maximum {
+        return Err(format!("interval must be at most {maximum} seconds"));
     }
     Ok(interval)
 }

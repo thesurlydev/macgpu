@@ -17,12 +17,19 @@ jobs:
         with:
           toolchain: 1.99.1
           targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build
-        run: cargo build --workspace --verbose
+        run: cargo build --workspace --verbose --locked
 
       - name: Check the report schema builds for Linux
-        run: cargo check -p macgpu-model --target x86_64-unknown-linux-gnu
+        run: cargo check -p macgpu-model --locked --target x86_64-unknown-linux-gnu
 
       - name: Run Tests
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --locked --no-fail-fast

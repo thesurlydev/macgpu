@@ -15,7 +15,7 @@ pub const MIN_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// How often to take a cheap firmware utilization reading between snapshots.
-pub const FIRMWARE_POLL: Duration = Duration::from_millis(250);
+const FIRMWARE_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EngineConfig {
@@ -41,7 +41,7 @@ enum Control {
 
 /// A running sampler thread. Dropping it stops the thread.
 pub struct Engine {
-    reports: Receiver<Report>,
+    reports: Option<Receiver<Report>>,
     control: Option<Sender<Control>>,
     thread: Option<JoinHandle<()>>,
     interval: Duration,
@@ -52,12 +52,14 @@ impl Engine {
         let (report_sender, reports) = mpsc::sync_channel(64);
         let (control, control_receiver) = mpsc::channel();
         let interval = clamp_interval(config.interval);
+        // The sampler is required for every front end; a spawn failure leaves
+        // no usable engine, so callers treat it as fatal.
         let thread = thread::Builder::new()
             .name("macgpu-sampler".into())
             .spawn(move || run(config, interval, report_sender, control_receiver))
             .expect("spawn sampler thread");
         Self {
-            reports,
+            reports: Some(reports),
             control: Some(control),
             thread: Some(thread),
             interval,
@@ -66,11 +68,14 @@ impl Engine {
 
     /// Waits for the next report. `None` if the sampler thread stopped.
     pub fn recv(&self) -> Option<Report> {
-        self.reports.recv().ok()
+        self.reports.as_ref()?.recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Report, RecvTimeoutError> {
-        self.reports.recv_timeout(timeout)
+        match &self.reports {
+            Some(reports) => reports.recv_timeout(timeout),
+            None => Err(RecvTimeoutError::Disconnected),
+        }
     }
 
     pub fn interval(&self) -> Duration {
@@ -94,13 +99,26 @@ impl Engine {
     }
 }
 
+/// Stops the sampler and waits for it. Shared with the shutdown test so the
+/// test exercises the same ordering as `Engine::drop`.
+fn stop_thread<T>(
+    control: &mut Option<Sender<Control>>,
+    reports: &mut Option<Receiver<T>>,
+    thread: &mut Option<JoinHandle<()>>,
+) {
+    // Closing the control channel stops the thread at its next wait.
+    control.take();
+    // Disconnect the reports first: a sampler blocked on a full channel must
+    // observe the closed receiver before the join can finish.
+    reports.take();
+    if let Some(thread) = thread.take() {
+        let _ = thread.join();
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
-        // Closing the control channel stops the thread at its next wait.
-        self.control.take();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        stop_thread(&mut self.control, &mut self.reports, &mut self.thread);
     }
 }
 
@@ -134,6 +152,8 @@ fn run(
                 }
                 Ok(Control::SetOptions(options)) => analyzer.set_options(options),
                 Err(RecvTimeoutError::Timeout) => {
+                    // Poll only while more than half the wait remains, so a
+                    // reading is not taken just before the snapshot's own.
                     if due.saturating_duration_since(Instant::now()) > FIRMWARE_POLL / 2 {
                         sampler.poll_firmware();
                     }
@@ -214,7 +234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
+    #[ignore = "needs a real GPU and runs a live sampling loop"]
     fn engine_emits_reports_at_interval() {
         let config = EngineConfig {
             interval: Duration::from_millis(200),
@@ -234,6 +254,35 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(380), "{elapsed:?}");
         assert!(first.totals.gpu_clients > 0);
         drop(engine);
+    }
+
+    #[test]
+    fn dropping_a_full_report_channel_does_not_hang() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(()).expect("fill the channel");
+        let (control, control_receiver) = mpsc::channel();
+        let (ready, ready_receiver) = mpsc::channel();
+        let sampler = thread::spawn(move || {
+            ready.send(()).expect("signal");
+            // A sampler blocked here must not keep drop waiting forever.
+            let _ = control_receiver.recv();
+            let _ = sender.send(());
+        });
+        ready_receiver.recv().expect("sampler started");
+
+        let (done, done_receiver) = mpsc::channel();
+        let stopper = thread::spawn(move || {
+            let mut control = Some(control);
+            let mut reports = Some(receiver);
+            let mut sampler = Some(sampler);
+            stop_thread(&mut control, &mut reports, &mut sampler);
+            done.send(()).expect("stopped");
+        });
+        assert!(
+            done_receiver.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "drop waited for a sampler blocked on a full report channel"
+        );
+        stopper.join().expect("stopper");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 //! The header meters and the dynamic events strip.
+use super::fmt;
 
 use super::app::{App, interval_label};
 use super::charts::{self};
@@ -70,7 +71,7 @@ pub(super) fn header_lines(app: &App, density: Density, width: u16) -> Vec<Line<
         Some(report) => format!(
             "cpu {:.1}%  {} ",
             report.overhead.process_cpu_pct,
-            style::clock(report.timestamp_ms)
+            fmt::clock(report.timestamp_ms)
         ),
         None => "waiting for the first sample ".into(),
     };
@@ -118,7 +119,7 @@ fn gpu_line(report: &Report) -> Line<'static> {
         Some(active) => {
             spans.extend(charts::gauge(active / 100.0, 20, GPU));
             spans.push(Span::styled(
-                format!(" {:>5}", style::pct(active)),
+                format!(" {:>5}", fmt::pct(active)),
                 style::strong(GPU),
             ));
             spans.push(Span::styled(" active", style::dim()));
@@ -128,7 +129,7 @@ fn gpu_line(report: &Report) -> Line<'static> {
     if let Some(normalized) = device.freq_normalized_pct {
         spans.push(Span::styled("  norm ", style::dim()));
         spans.push(Span::styled(
-            style::pct(normalized),
+            fmt::pct(normalized),
             style::accent(style::NORMALIZED),
         ));
     }
@@ -265,7 +266,7 @@ fn usage_line(report: &Report, width: u16) -> Line<'static> {
     let totals = &report.totals;
     let mut spans = vec![
         Span::styled(" USE ", style::label()),
-        Span::styled(style::ms(totals.attributed_ms_per_s), style::strong(GPU)),
+        Span::styled(fmt::ms(totals.attributed_ms_per_s), style::strong(GPU)),
         Span::styled(" ms/s attributed", style::dim()),
         sep(),
         Span::styled(totals.active_processes.to_string(), style::label()),
@@ -287,7 +288,7 @@ fn usage_line(report: &Report, width: u16) -> Line<'static> {
         // Partial: some apps' share could not be separated, so this is a floor.
         let floor = if unattributed.partial { "≥" } else { "" };
         spans.push(Span::styled(
-            format!("{floor}{}", style::ms(unattributed.busy_ms_per_s)),
+            format!("{floor}{}", fmt::ms(unattributed.busy_ms_per_s)),
             style::label(),
         ));
         spans.push(Span::styled(" ms/s", style::dim()));
@@ -343,11 +344,11 @@ fn compact_gpu_spans(report: Option<&Report>) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if let Some(active) = device.active_pct {
         spans.push(Span::styled("  GPU ", style::label()));
-        spans.push(Span::styled(style::pct(active), style::strong(GPU)));
+        spans.push(Span::styled(fmt::pct(active), style::strong(GPU)));
     } else {
         spans.push(Span::styled("  ", style::label()));
         spans.push(Span::styled(
-            format!("{} ms/s", style::ms(report.totals.attributed_ms_per_s)),
+            format!("{} ms/s", fmt::ms(report.totals.attributed_ms_per_s)),
             style::strong(GPU),
         ));
     }
@@ -359,7 +360,7 @@ fn compact_gpu_spans(report: Option<&Report>) -> Vec<Span<'static>> {
     }
     if let Some(power) = device.power_w {
         spans.push(Span::styled(
-            format!(" {}W", style::watts(power)),
+            format!(" {}W", fmt::watts_digits(power)),
             style::accent(style::POWER),
         ));
     }
@@ -378,12 +379,12 @@ fn compact_context_line(report: &Report) -> Line<'static> {
     if let Some(in_use) = device.memory.in_use_bytes {
         spans.push(Span::styled("mem ", style::dim()));
         spans.push(Span::styled(
-            style::bytes_short(in_use),
+            fmt::bytes_short(in_use),
             style::accent(style::MEMORY),
         ));
         if let Some(limit) = device.memory.wired_limit_bytes {
             spans.push(Span::styled(
-                format!("/{}", style::bytes_short(limit)),
+                format!("/{}", fmt::bytes_short(limit)),
                 style::dim(),
             ));
         }
@@ -391,7 +392,7 @@ fn compact_context_line(report: &Report) -> Line<'static> {
     }
     if device.active_pct.is_some() {
         spans.push(Span::styled(
-            style::ms(report.totals.attributed_ms_per_s),
+            fmt::ms(report.totals.attributed_ms_per_s),
             style::accent(GPU),
         ));
         spans.push(Span::styled(" ms/s", style::dim()));
@@ -468,8 +469,6 @@ fn pressure_style(level: &str) -> Style {
     }
 }
 
-/// The power controller's limiting reason, if anything other than normal
-/// performance control is in effect.
 const THROTTLE_PREFIX: &str = "GPU Throttler Counters/";
 const THROTTLE_TOTAL: &str = "GPU Throttler Counters/Throttle Counter Total";
 const THM_ACTIVATIONS: &str = "THM Counters/THM Activation Count";
@@ -488,9 +487,9 @@ fn limiter_guess(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The power controller's limiter states (shares of powered time), when
-/// anything other than demand-following states is in effect.
-pub fn limiter_text(report: &Report) -> Option<String> {
+/// The power controller's limiting reason, if anything other than normal
+/// performance control is in effect.
+fn limiter_text(report: &Report) -> Option<String> {
     let limits: Vec<String> = report
         .device
         .limiting_states()
@@ -579,7 +578,7 @@ pub(super) fn event_lines(app: &App, max: usize) -> Vec<Line<'static>> {
                 Style::new().fg(Color::Black).bg(color),
             ),
             Span::styled(
-                format!(" {} ", style::clock(event.timestamp_ms)),
+                format!(" {} ", fmt::clock(event.timestamp_ms)),
                 style::dim(),
             ),
             Span::styled(event.message.clone(), style::accent(color)),
@@ -596,7 +595,7 @@ pub(super) fn event_lines(app: &App, max: usize) -> Vec<Line<'static>> {
     lines
 }
 
-pub fn event_label(kind: EventKind) -> (&'static str, Color) {
+fn event_label(kind: EventKind) -> (&'static str, Color) {
     match kind {
         EventKind::GpuRecovery => ("RECOVERY", style::ALERT),
         EventKind::GpuIssue => ("ISSUE", style::ALERT),

@@ -16,10 +16,11 @@ pub fn truncate(value: &str, max: usize) -> String {
     result
 }
 
+pub const KIB: f64 = 1024.0;
+pub const MIB: f64 = KIB * 1024.0;
+pub const GIB: f64 = MIB * 1024.0;
+
 pub fn bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
     let bytes = bytes as f64;
     if bytes >= GIB {
         format!("{:.1} GiB", bytes / GIB)

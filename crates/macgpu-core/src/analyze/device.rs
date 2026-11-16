@@ -2,8 +2,10 @@
 //! (from IOReport, SMC, and system sources) residency, clock, power, limiters,
 //! temperature, and pressure.
 
+use super::NS_PER_S;
 use crate::snapshot::Snapshot;
 use crate::sys::gpu_freq::FrequencyTable;
+use crate::sys::iokit::{Accelerator, Registry};
 use crate::sys::ioreport::{IoReportSample, channel, energy_to_joules};
 use crate::sys::smc::{self, GpuTemperatures};
 use crate::sys::system::{self, SystemContext};
@@ -33,35 +35,23 @@ pub(super) fn fill(previous: &Snapshot, current: &Snapshot, window_ns: u64, repo
             device.model = accelerator.info.model.clone();
             device.gpu_cores = accelerator.info.core_count;
         }
-        device.memory.in_use_bytes = sum_some(
-            registry
-                .accelerators
-                .iter()
-                .map(|accelerator| accelerator.performance.in_use_system_memory),
-        );
-        device.memory.allocated_bytes = sum_some(
-            registry
-                .accelerators
-                .iter()
-                .map(|accelerator| accelerator.performance.alloc_system_memory),
-        );
-        device.recovery_count = sum_some(
-            registry
-                .accelerators
-                .iter()
-                .map(|accelerator| accelerator.performance.recovery_count),
-        );
+        device.memory.in_use_bytes = registry_sum(registry, |accelerator| {
+            accelerator.performance.in_use_system_memory
+        });
+        device.memory.allocated_bytes = registry_sum(registry, |accelerator| {
+            accelerator.performance.alloc_system_memory
+        });
+        device.recovery_count = registry_sum(registry, |accelerator| {
+            accelerator.performance.recovery_count
+        });
     }
 
     device.firmware_utilization = firmware_utilization(current);
 
     let previous_recoveries = previous.registry.as_ref().ok().and_then(|registry| {
-        sum_some(
-            registry
-                .accelerators
-                .iter()
-                .map(|accelerator| accelerator.performance.recovery_count),
-        )
+        registry_sum(registry, |accelerator| {
+            accelerator.performance.recovery_count
+        })
     });
     if let (Some(before), Some(after)) = (previous_recoveries, device.recovery_count)
         && after > before
@@ -224,7 +214,7 @@ fn fill_ioreport(
 fn sample_seconds(before: &IoReportSample, after: &IoReportSample, window_ns: u64) -> f64 {
     let ns = after.taken_at_ns.saturating_sub(before.taken_at_ns);
     let ns = if ns == 0 { window_ns.max(1) } else { ns };
-    ns as f64 / 1e9
+    ns as f64 / NS_PER_S
 }
 
 /// Fills active residency, P-state shares, and clock from `GPUPH` residency.
@@ -469,10 +459,10 @@ fn fill_system(context: &SystemContext, device: &mut DeviceView) -> SourceStatus
     let status = health.status();
     if status.state == SourceState::Ok && context.wired_limit_is_default() {
         // Not a failure: the OS default applies and its value is not exposed.
-        return SourceStatus {
-            state: SourceState::Ok,
-            detail: Some("GPU wired limit is the OS default (iogpu.wired_limit_mb=0)".into()),
-        };
+        return SourceStatus::with(
+            SourceState::Ok,
+            "GPU wired limit is the OS default (iogpu.wired_limit_mb=0)",
+        );
     }
     status
 }
@@ -528,6 +518,11 @@ fn firmware_utilization(current: &Snapshot) -> Option<FirmwareUtilization> {
         tiler_pct: mean(|reading| reading.2),
         readings: readings.len() as u32,
     })
+}
+
+/// Sums an optional counter over every GPU accelerator.
+fn registry_sum(registry: &Registry, value: impl Fn(&Accelerator) -> Option<u64>) -> Option<u64> {
+    sum_some(registry.accelerators.iter().map(value))
 }
 
 fn sum_some(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
@@ -979,8 +974,8 @@ mod tests {
 
     #[test]
     fn idle_sensors_that_stop_reporting_leave_temperature_out() {
-        // An idle M4 Max's sensors read placeholders for about a second; 16
-        // of 44 read 1.6-1.8 C, which used to pass as a 2 C die.
+        // Idle GPU sensors can read placeholders of 1.6-1.8 C, below the
+        // 2 C minimum for a plausible die temperature.
         let mut device = DeviceView::default();
         let temperatures = GpuTemperatures {
             sensors: [-4.0, 1.6, 0.0, 1.8]
@@ -1030,7 +1025,6 @@ mod tests {
         assert_eq!(device.system.memory_pressure.as_deref(), Some("warning"));
         assert_eq!(device.memory.total_physical_bytes, Some(48 << 30));
         assert_eq!(device.memory.wired_limit_bytes, None);
-        assert_eq!(device.memory.recommended_working_set_bytes, None);
         assert_eq!(report.sources[source::SYSTEM].state, SourceState::Ok);
         assert_eq!(report.events.len(), 1);
         assert_eq!(report.events[0].kind, EventKind::ThermalPressure);

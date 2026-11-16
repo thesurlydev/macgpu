@@ -2,7 +2,7 @@
 //! strip, the table, and the footer. Layout adapts to the terminal: `Full`
 //! from 100x30, `Compact` for small panes (80x24 tmux, SSH), `Tiny` below that.
 
-use super::app::{App, Overlay, SIGNALS, Screen, StatusLevel};
+use super::app::{App, Confirm, Overlay, SIGNALS, Screen, StatusLevel};
 use super::graphs::{self, WhoChart};
 use super::header::{event_lines, header_lines};
 use super::style::{self, GPU, LABEL};
@@ -21,10 +21,15 @@ pub enum Density {
     Tiny,
 }
 
-pub fn density(area: Rect) -> Density {
-    if area.width >= 100 && area.height >= 30 {
+const FULL_MIN_WIDTH: u16 = 100;
+const FULL_MIN_HEIGHT: u16 = 30;
+const COMPACT_MIN_WIDTH: u16 = 60;
+const COMPACT_MIN_HEIGHT: u16 = 16;
+
+pub(super) fn density(area: Rect) -> Density {
+    if area.width >= FULL_MIN_WIDTH && area.height >= FULL_MIN_HEIGHT {
         Density::Full
-    } else if area.width >= 60 && area.height >= 16 {
+    } else if area.width >= COMPACT_MIN_WIDTH && area.height >= COMPACT_MIN_HEIGHT {
         Density::Compact
     } else {
         Density::Tiny
@@ -58,10 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let body = Rect::new(area.x, y, area.width, footer_y.saturating_sub(y));
     match &app.screen {
-        Screen::Detail(detail) => {
-            let detail = detail.clone();
-            detail::draw(frame, body, app, &detail);
-        }
+        Screen::Detail(detail) => detail::draw(frame, body, app, detail),
         Screen::Main => draw_main(frame, body, app, density, &who),
     }
 
@@ -116,19 +118,25 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App, density: Density, who
 
 // ---- footer and overlays ------------------------------------------------
 
-const HINTS: &[(&str, &str)] = &[
-    ("q", "quit"),
-    ("?", "help"),
-    ("/", "filter"),
-    ("g", "group"),
-    ("t", "tree"),
-    ("s", "sort"),
-    ("⏎", "detail"),
-    ("k", "signal"),
-    ("f", "freeze"),
-    ("z", "zoom"),
-    ("+-", "interval"),
-    ("a", "idle"),
+/// Key, description, and whether the hint is only shown when signalling is on.
+const HINTS: &[(&str, &str, bool)] = &[
+    ("q", "quit", false),
+    ("?", "help", false),
+    ("/", "filter", false),
+    ("Esc", "clear", false),
+    ("g G", "group", false),
+    ("t", "tree", false),
+    ("s . ,", "sort", false),
+    ("S r", "reverse", false),
+    ("⏎", "detail", false),
+    ("↑↓", "move", false),
+    ("PgUp PgDn", "page", false),
+    ("Home End", "ends", false),
+    ("k", "signal", true),
+    ("f space", "freeze", false),
+    ("z Z", "zoom", false),
+    ("+ -", "interval", false),
+    ("a", "idle", false),
 ];
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -139,7 +147,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(input.clone(), style::title()),
             Span::styled("▏", style::accent(style::WARNING)),
             Span::styled(
-                "  name, path or PID; comma separates, ! excludes · Enter keep · Esc cancel",
+                "  name, path or PID; comma separates, ! excludes · Enter keep · Esc cancel · Ctrl-U clear · Ctrl-W word · Backspace",
                 style::dim(),
             ),
         ])
@@ -155,21 +163,22 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let mut spans = vec![Span::raw(" ")];
         let detail = matches!(app.screen, Screen::Detail(_));
-        let hints: Vec<(&str, &str)> = if detail {
-            vec![
-                ("Esc", "back"),
-                ("↑↓", "scroll"),
-                ("k", "signal"),
-                ("z", "zoom"),
-                ("f", "freeze"),
-                ("?", "help"),
-                ("q", "quit"),
+        let hints: &[(&str, &str, bool)] = if detail {
+            &[
+                ("Esc ⏎ ← Backspace", "back", false),
+                ("↑↓ PgUp PgDn", "scroll", false),
+                ("Home End", "ends", false),
+                ("k", "signal", true),
+                ("z Z", "zoom", false),
+                ("f space", "freeze", false),
+                ("?", "help", false),
+                ("q", "quit", false),
             ]
         } else {
-            HINTS.to_vec()
+            HINTS
         };
-        for (key, text) in hints {
-            if key == "k" && app.readonly {
+        for &(key, text, signal) in hints {
+            if signal && app.readonly {
                 continue;
             }
             spans.push(Span::styled(key, style::accent(GPU)));
@@ -180,7 +189,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &super::app::Confirm) {
+fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &Confirm) {
     let width = 60.min(area.width.saturating_sub(4));
     let height = 7.min(area.height);
     let popup = Rect::new(

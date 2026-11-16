@@ -4,13 +4,11 @@
 
 use super::history::History;
 use super::linger::{Linger, ProcessAlive};
+pub(super) use super::sort::SortKey;
 use super::tree::{sort_rows, tree_rows};
 use crate::model::{AppView, ProcessView, Report};
 use crate::view::{self, Filter, Group, Row, RowKey};
-use crossterm::event::MouseEventKind;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent};
 use ratatui::layout::Rect;
-use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -24,7 +22,13 @@ const DEFAULT_ZOOM: usize = 0;
 /// Reports buffered while frozen; older ones are applied anyway.
 const MAX_PENDING: usize = 3600;
 const STATUS_DURATION: Duration = Duration::from_secs(4);
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+pub(super) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// Rows per PageUp/PageDown in the table and per PageUp/PageDown of help.
+pub(super) const PAGE_ROWS: u16 = 10;
+/// Rows per mouse wheel notch.
+pub(super) const WHEEL_ROWS: isize = 3;
+/// Depth limit for the parent chain shown in process detail.
+const MAX_PARENT_DEPTH: usize = 16;
 
 /// Signals offered by the confirmation prompt, the default first.
 pub const SIGNALS: [(i32, &str); 4] = [
@@ -47,101 +51,6 @@ pub enum Effect {
         signal: i32,
         name: String,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SortKey {
-    Gpu,
-    Power,
-    Memory,
-    Children,
-    Last,
-    Lifetime,
-    Pid,
-    Name,
-}
-
-impl SortKey {
-    pub const ALL: [SortKey; 8] = [
-        SortKey::Gpu,
-        SortKey::Power,
-        SortKey::Memory,
-        SortKey::Children,
-        SortKey::Last,
-        SortKey::Lifetime,
-        SortKey::Pid,
-        SortKey::Name,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            SortKey::Gpu => "GPU ms/s",
-            SortKey::Power => "power",
-            SortKey::Memory => "GPU memory",
-            SortKey::Children => "queues",
-            SortKey::Last => "last submit",
-            SortKey::Lifetime => "lifetime",
-            SortKey::Pid => "PID",
-            SortKey::Name => "name",
-        }
-    }
-
-    fn step(self, forward: bool) -> SortKey {
-        let index = Self::ALL.iter().position(|key| *key == self).unwrap_or(0);
-        let len = Self::ALL.len();
-        Self::ALL[if forward {
-            (index + 1) % len
-        } else {
-            (index + len - 1) % len
-        }]
-    }
-
-    /// Orders `a` before `b` in this key's natural direction: biggest first for
-    /// amounts, most recent first for submissions, ascending for PID and name.
-    /// Missing values sort last in either direction.
-    pub(super) fn compare(self, a: &Row, b: &Row, reverse: bool) -> Ordering {
-        fn optional<T: PartialOrd>(
-            a: Option<T>,
-            b: Option<T>,
-            descending: bool,
-            reverse: bool,
-        ) -> Ordering {
-            match (a, b) {
-                (Some(a), Some(b)) => {
-                    let order = a.partial_cmp(&b).unwrap_or(Ordering::Equal);
-                    let order = if descending { order.reverse() } else { order };
-                    if reverse { order.reverse() } else { order }
-                }
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-        }
-        let primary = match self {
-            SortKey::Gpu => optional(Some(a.gpu_ns), Some(b.gpu_ns), true, reverse),
-            SortKey::Power => optional(a.power_w, b.power_w, true, reverse),
-            SortKey::Memory => optional(a.memory_bytes, b.memory_bytes, true, reverse),
-            SortKey::Children => optional(Some(a.children), Some(b.children), true, reverse),
-            SortKey::Last => optional(a.last_submit_age_ms, b.last_submit_age_ms, false, reverse),
-            SortKey::Lifetime => optional(
-                Some(a.lifetime_gpu_ns),
-                Some(b.lifetime_gpu_ns),
-                true,
-                reverse,
-            ),
-            SortKey::Pid => optional(a.pid, b.pid, false, reverse),
-            SortKey::Name => optional(
-                Some(a.name.to_lowercase()),
-                Some(b.name.to_lowercase()),
-                false,
-                reverse,
-            ),
-        };
-        primary
-            .then_with(|| b.gpu_ns.cmp(&a.gpu_ns))
-            .then_with(|| b.lifetime_gpu_ns.cmp(&a.lifetime_gpu_ns))
-            .then_with(|| a.key.cmp(&b.key))
-    }
 }
 
 /// A row as displayed: flat, or indented under its parent in tree view.
@@ -264,8 +173,9 @@ pub struct App {
     /// The report on screen (with recently idle rows merged back in).
     pub report: Option<Report>,
     pub history: History,
-    pending: VecDeque<(Report, bool)>,
-    linger: Linger,
+    pub(super) pending: VecDeque<(Report, bool)>,
+    pub(super) linger: Linger,
+    #[cfg(test)]
     pub reports_seen: u64,
 
     pub group: Group,
@@ -286,11 +196,11 @@ pub struct App {
     pub overlay: Overlay,
     pub status: Option<Status>,
     pub hitboxes: Hitboxes,
-    last_click: Option<(Instant, RowKey)>,
-    effects: Vec<Effect>,
-    dirty: bool,
-    lookup: Option<ProcessLookup>,
-    alive: Option<ProcessAlive>,
+    pub(super) last_click: Option<(Instant, RowKey)>,
+    pub(super) effects: Vec<Effect>,
+    pub(super) dirty: bool,
+    pub(super) lookup: Option<ProcessLookup>,
+    pub(super) alive: Option<ProcessAlive>,
 }
 
 impl App {
@@ -307,6 +217,7 @@ impl App {
             history: History::default(),
             pending: VecDeque::new(),
             linger: Linger::default(),
+            #[cfg(test)]
             reports_seen: 0,
             group,
             sort: SortKey::Gpu,
@@ -394,7 +305,7 @@ impl App {
 
     /// Takes a new report. `alert_firing` is what the alert rules said about it.
     pub fn push_report(&mut self, report: Report, alert_firing: bool) {
-        self.reports_seen += 1;
+        self.count_report();
         if self.frozen {
             if self.pending.len() == MAX_PENDING
                 && let Some((oldest, firing)) = self.pending.pop_front()
@@ -407,6 +318,14 @@ impl App {
         }
         self.apply_report(report, alert_firing);
     }
+
+    #[cfg(test)]
+    fn count_report(&mut self) {
+        self.reports_seen += 1;
+    }
+
+    #[cfg(not(test))]
+    fn count_report(&mut self) {}
 
     pub fn end_feed(&mut self) {
         if !self.feed_ended {
@@ -475,7 +394,7 @@ impl App {
         }
     }
 
-    fn select_index(&mut self, index: usize) {
+    pub(super) fn select_index(&mut self, index: usize) {
         if self.rows.is_empty() {
             return;
         }
@@ -484,7 +403,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn move_selection(&mut self, delta: isize) {
+    pub(super) fn move_selection(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
         }
@@ -498,266 +417,9 @@ impl App {
 
     // ---- input --------------------------------------------------------------
 
-    pub fn handle_key(&mut self, key: KeyEvent) {
-        if key.kind == KeyEventKind::Release {
-            return;
-        }
-        self.dirty = true;
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
-        {
-            self.effects.push(Effect::Quit);
-            return;
-        }
-        match &self.overlay {
-            Overlay::Help { .. } => return self.help_key(key),
-            Overlay::Filter { .. } => return self.filter_key(key),
-            Overlay::Confirm(_) => return self.confirm_key(key),
-            Overlay::None => {}
-        }
-        if matches!(self.screen, Screen::Detail(_)) && self.detail_key(key) {
-            return;
-        }
-        self.main_key(key);
-    }
-
-    /// Keys shared by both screens.
-    fn main_key(&mut self, key: KeyEvent) {
-        let page = self.page_rows();
-        match key.code {
-            KeyCode::Char('q') => self.effects.push(Effect::Quit),
-            KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help { scroll: 0 },
-            KeyCode::Char('/') => {
-                self.overlay = Overlay::Filter {
-                    input: self.filter_text.clone(),
-                    previous: self.filter_text.clone(),
-                }
-            }
-            KeyCode::Esc if !self.filter.is_empty() => self.apply_filter(String::new()),
-            KeyCode::Char('s') | KeyCode::Char('.') | KeyCode::Char('>') => {
-                self.set_sort(self.sort.step(true), false)
-            }
-            KeyCode::Char(',') | KeyCode::Char('<') => self.set_sort(self.sort.step(false), false),
-            KeyCode::Char('S') | KeyCode::Char('r') => {
-                self.reverse = !self.reverse;
-                self.rebuild_rows();
-                self.sort_status();
-            }
-            KeyCode::Char('g') => self.set_group(self.group.next()),
-            KeyCode::Char('G') => self.set_group(self.group.next().next().next()),
-            KeyCode::Char('t') => {
-                self.tree = !self.tree;
-                self.rebuild_rows();
-                self.set_status(
-                    if self.tree { "tree view" } else { "flat view" },
-                    StatusLevel::Info,
-                );
-            }
-            KeyCode::Char('f') | KeyCode::Char(' ') => self.toggle_freeze(),
-            KeyCode::Char('z') => self.step_zoom(true),
-            KeyCode::Char('Z') => self.step_zoom(false),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.step_interval(true),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.step_interval(false),
-            KeyCode::Char('a') => {
-                self.include_idle = !self.include_idle;
-                self.effects.push(Effect::SetIncludeIdle(self.include_idle));
-                let what = if self.include_idle {
-                    "showing idle GPU clients"
-                } else {
-                    "hiding idle GPU clients"
-                };
-                let note = if self.live {
-                    ""
-                } else {
-                    " (a recording decides this)"
-                };
-                self.set_status(format!("{what}{note}"), StatusLevel::Info);
-            }
-            KeyCode::Char('k') => self.prompt_signal(),
-            KeyCode::Enter => self.open_detail(),
-            KeyCode::Up => self.move_selection(-1),
-            KeyCode::Down => self.move_selection(1),
-            KeyCode::PageUp => self.move_selection(-(page as isize)),
-            KeyCode::PageDown => self.move_selection(page as isize),
-            KeyCode::Home => self.select_index(0),
-            KeyCode::End => self.select_index(self.rows.len().saturating_sub(1)),
-            _ => {}
-        }
-    }
-
-    /// Detail-screen keys. Returns false to fall through to the shared keys.
-    fn detail_key(&mut self, key: KeyEvent) -> bool {
-        let Screen::Detail(detail) = &mut self.screen else {
-            return false;
-        };
-        match key.code {
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Enter => {
-                self.screen = Screen::Main
-            }
-            KeyCode::Up => detail.scroll = detail.scroll.saturating_sub(1),
-            KeyCode::Down => detail.scroll = detail.scroll.saturating_add(1),
-            KeyCode::PageUp => detail.scroll = detail.scroll.saturating_sub(10),
-            KeyCode::PageDown => detail.scroll = detail.scroll.saturating_add(10),
-            KeyCode::Home => detail.scroll = 0,
-            KeyCode::Char('g' | 'G' | 't' | '/' | 's' | 'S' | '.' | ',' | '<' | '>' | 'r') => {}
-            _ => return false,
-        }
-        true
-    }
-
-    fn help_key(&mut self, key: KeyEvent) {
-        let Overlay::Help { scroll } = &mut self.overlay else {
-            return;
-        };
-        match key.code {
-            KeyCode::Up => *scroll = scroll.saturating_sub(1),
-            KeyCode::Down => *scroll = scroll.saturating_add(1),
-            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
-            KeyCode::PageDown | KeyCode::Char(' ') => *scroll = scroll.saturating_add(10),
-            KeyCode::Home => *scroll = 0,
-            _ => self.overlay = Overlay::None,
-        }
-    }
-
-    fn filter_key(&mut self, key: KeyEvent) {
-        let Overlay::Filter { input, previous } = &mut self.overlay else {
-            return;
-        };
-        match key.code {
-            KeyCode::Enter => {
-                let text = input.clone();
-                self.overlay = Overlay::None;
-                self.apply_filter(text);
-                return;
-            }
-            KeyCode::Esc => {
-                let text = previous.clone();
-                self.overlay = Overlay::None;
-                self.apply_filter(text);
-                return;
-            }
-            KeyCode::Backspace => {
-                input.pop();
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => input.clear(),
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let trimmed = input.trim_end().len();
-                let cut = input[..trimmed]
-                    .rfind([' ', ','])
-                    .map(|index| index + 1)
-                    .unwrap_or(0);
-                input.truncate(cut);
-            }
-            KeyCode::Char(character) => input.push(character),
-            _ => return,
-        }
-        // Apply as you type.
-        let text = input.clone();
-        self.filter = Filter::parse(&text);
-        self.rebuild_rows();
-    }
-
-    fn confirm_key(&mut self, key: KeyEvent) {
-        let Overlay::Confirm(confirm) = &mut self.overlay else {
-            return;
-        };
-        match key.code {
-            KeyCode::Left | KeyCode::BackTab | KeyCode::Up => {
-                confirm.signal = (confirm.signal + SIGNALS.len() - 1) % SIGNALS.len()
-            }
-            KeyCode::Right | KeyCode::Tab | KeyCode::Down => {
-                confirm.signal = (confirm.signal + 1) % SIGNALS.len()
-            }
-            KeyCode::Char('9') | KeyCode::Char('K') => confirm.signal = 1,
-            KeyCode::Enter | KeyCode::Char('y') => {
-                let confirm = confirm.clone();
-                self.overlay = Overlay::None;
-                self.effects.push(Effect::Signal {
-                    pid: confirm.pid,
-                    start_us: confirm.start_us,
-                    signal: SIGNALS[confirm.signal].0,
-                    name: confirm.name,
-                });
-            }
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
-                self.overlay = Overlay::None;
-                self.set_status("signal cancelled", StatusLevel::Info);
-            }
-            _ => {}
-        }
-    }
-
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.overlay != Overlay::None {
-            return;
-        }
-        if let Screen::Detail(detail) = &mut self.screen {
-            match mouse.kind {
-                MouseEventKind::ScrollDown => detail.scroll = detail.scroll.saturating_add(3),
-                MouseEventKind::ScrollUp => detail.scroll = detail.scroll.saturating_sub(3),
-                _ => return,
-            }
-            self.dirty = true;
-            return;
-        }
-        let table = self.hitboxes.table;
-        match mouse.kind {
-            MouseEventKind::ScrollDown => self.move_selection(3),
-            MouseEventKind::ScrollUp => self.move_selection(-3),
-            MouseEventKind::Down(MouseButton::Left) => {
-                if mouse.row == self.hitboxes.header_y && table.height > 0 {
-                    let column = self
-                        .hitboxes
-                        .header
-                        .iter()
-                        .find(|(x, width, _)| mouse.column >= *x && mouse.column < x + width)
-                        .and_then(|(_, _, column)| column.sort_key());
-                    if let Some(sort) = column {
-                        if sort == self.sort {
-                            self.reverse = !self.reverse;
-                            self.rebuild_rows();
-                            self.sort_status();
-                        } else {
-                            self.set_sort(sort, true);
-                        }
-                    }
-                    return;
-                }
-                let inside = mouse.column >= table.x
-                    && mouse.column < table.x + table.width
-                    && mouse.row >= table.y
-                    && mouse.row < table.y + table.height;
-                if !inside {
-                    return;
-                }
-                let index = self.scroll + (mouse.row - table.y) as usize;
-                if index >= self.rows.len() {
-                    return;
-                }
-                self.select_index(index);
-                let key = self.rows[index].row.key;
-                let now = Instant::now();
-                let double = self.last_click.is_some_and(|(at, last)| {
-                    last == key && now.duration_since(at) <= DOUBLE_CLICK
-                });
-                self.last_click = Some((now, key));
-                if double {
-                    self.last_click = None;
-                    self.open_detail();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Rows that fit the table, for paging.
-    fn page_rows(&self) -> usize {
-        (self.hitboxes.table.height as usize).max(1)
-    }
-
     // ---- actions ------------------------------------------------------------
 
-    fn apply_filter(&mut self, text: String) {
+    pub(super) fn apply_filter(&mut self, text: String) {
         self.filter = Filter::parse(&text);
         self.filter_text = self.filter.to_string();
         self.rebuild_rows();
@@ -766,7 +428,7 @@ impl App {
         }
     }
 
-    fn set_sort(&mut self, sort: SortKey, reset_reverse: bool) {
+    pub(super) fn set_sort(&mut self, sort: SortKey, reset_reverse: bool) {
         self.sort = sort;
         if reset_reverse {
             self.reverse = false;
@@ -775,7 +437,7 @@ impl App {
         self.sort_status();
     }
 
-    fn sort_status(&mut self) {
+    pub(super) fn sort_status(&mut self) {
         let direction = if self.reverse { ", reversed" } else { "" };
         self.set_status(
             format!("sort by {}{direction}", self.sort.label()),
@@ -783,7 +445,7 @@ impl App {
         );
     }
 
-    fn set_group(&mut self, group: Group) {
+    pub(super) fn set_group(&mut self, group: Group) {
         let related = match (self.selected, &self.report) {
             (Some(key), Some(report)) => related_key(report, key, group),
             _ => None,
@@ -797,7 +459,7 @@ impl App {
         self.set_status(format!("grouped by {}", group.label()), StatusLevel::Info);
     }
 
-    fn toggle_freeze(&mut self) {
+    pub(super) fn toggle_freeze(&mut self) {
         self.frozen = !self.frozen;
         if self.frozen {
             self.set_status("frozen: f resumes", StatusLevel::Info);
@@ -814,7 +476,7 @@ impl App {
         }
     }
 
-    fn step_zoom(&mut self, longer: bool) {
+    pub(super) fn step_zoom(&mut self, longer: bool) {
         self.zoom = if longer {
             (self.zoom + 1) % ZOOM_SPANS_S.len()
         } else {
@@ -826,7 +488,7 @@ impl App {
         );
     }
 
-    fn step_interval(&mut self, longer: bool) {
+    pub(super) fn step_interval(&mut self, longer: bool) {
         if !self.live {
             self.set_status(
                 "replay: the recording fixes the interval",
@@ -904,10 +566,7 @@ impl App {
                 process_target(pid)
             }
             RowKey::App { coalition_id } => {
-                let app = report
-                    .apps
-                    .iter()
-                    .find(|app| app.coalition_id == coalition_id)?;
+                let app = report.app(coalition_id)?;
                 let pid = app.responsible_pid?;
                 process_target(pid).or(Some((pid, None, app.name.clone())))
             }
@@ -915,7 +574,7 @@ impl App {
         }
     }
 
-    fn prompt_signal(&mut self) {
+    pub(super) fn prompt_signal(&mut self) {
         if self.readonly {
             self.set_status("read-only: signals are disabled", StatusLevel::Error);
             return;
@@ -946,7 +605,7 @@ impl App {
         });
     }
 
-    fn open_detail(&mut self) {
+    pub(super) fn open_detail(&mut self) {
         let (Some(row), Some(report)) = (self.selected_row(), &self.report) else {
             return;
         };
@@ -1033,7 +692,8 @@ impl Detail {
 fn parent_chain(mut ppid: Option<i32>, lookup: ProcessLookup) -> Vec<(i32, String)> {
     let mut chain = Vec::new();
     while let Some(pid) = ppid {
-        if pid <= 0 || chain.len() >= 16 || chain.iter().any(|(seen, _)| *seen == pid) {
+        if pid <= 0 || chain.len() >= MAX_PARENT_DEPTH || chain.iter().any(|(seen, _)| *seen == pid)
+        {
             break;
         }
         match lookup(pid) {
@@ -1087,11 +747,7 @@ pub fn span_label(span_ms: u64) -> String {
 fn related_key(report: &Report, key: RowKey, group: Group) -> Option<RowKey> {
     let process = match key {
         RowKey::Process { pid, start_us } => report.process(pid, start_us),
-        RowKey::Client { registry_id } => report
-            .processes
-            .iter()
-            .find(|process| process.clients.iter().any(|c| c.registry_id == registry_id)),
-        RowKey::Queue { registry_id, .. } => report
+        RowKey::Client { registry_id } | RowKey::Queue { registry_id, .. } => report
             .processes
             .iter()
             .find(|process| process.clients.iter().any(|c| c.registry_id == registry_id)),

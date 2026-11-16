@@ -7,11 +7,65 @@ use crate::format;
 use crate::model::{Report, SourceState};
 use crate::view::{self, Filter, Group, Row, RowKey};
 use anyhow::{Context, Result};
+use std::error::Error;
 use std::fmt::Write as _;
 use std::io::{self, IsTerminal, Write};
 
 /// Exit status when `--exit-on-alert` is set and an alert fired.
 pub const ALERT_EXIT_CODE: i32 = 3;
+
+/// Clear screen and move the cursor home before a refreshed table.
+const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
+
+/// The exit status shared by every front end that supports `--exit-on-alert`.
+pub fn alert_exit_code(exit_on_alert: bool, alert_fired: bool) -> i32 {
+    if exit_on_alert && alert_fired {
+        ALERT_EXIT_CODE
+    } else {
+        0
+    }
+}
+
+/// True when `error` is (or wraps) a closed pipe, a normal way to stop writing.
+pub fn is_broken_pipe(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(io) = error.downcast_ref::<io::Error>() {
+            return io.kind() == io::ErrorKind::BrokenPipe;
+        }
+        current = error.source();
+    }
+    false
+}
+
+impl From<&ViewArgs> for TableOptions {
+    fn from(args: &ViewArgs) -> Self {
+        table_options(
+            args.selection.group,
+            args.selection.filter(),
+            args.top,
+            args.all,
+            args.verbose,
+        )
+    }
+}
+
+/// Builds printed-table options for every command that prints tables.
+pub(crate) fn table_options(
+    group: Group,
+    filter: Filter,
+    top: usize,
+    all: bool,
+    verbose: bool,
+) -> TableOptions {
+    TableOptions {
+        group,
+        filter,
+        top,
+        all,
+        verbose,
+    }
+}
 
 pub struct TableOptions {
     pub group: Group,
@@ -36,13 +90,7 @@ pub fn run(args: &ViewArgs) -> Result<i32> {
     };
     let engine = Engine::start(args.sampling.engine_config(default_interval, args.all));
     let mut alerts = Alerts::from_args(&args.alerts)?;
-    let options = TableOptions {
-        group: args.selection.group,
-        filter: args.selection.filter(),
-        top: args.top,
-        all: args.all,
-        verbose: args.verbose,
-    };
+    let options = TableOptions::from(args);
     let clear = args.watch && !args.json && io::stdout().is_terminal();
     let mut stdout = io::stdout().lock();
     let mut printed = 0usize;
@@ -60,7 +108,7 @@ pub fn run(args: &ViewArgs) -> Result<i32> {
                 writeln!(stdout, "{text}")?;
             } else {
                 if clear {
-                    write!(stdout, "\x1b[2J\x1b[H")?;
+                    write!(stdout, "{CLEAR_SCREEN}")?;
                 }
                 write!(stdout, "{}", render(&report, &options))?;
             }
@@ -70,7 +118,7 @@ pub fn run(args: &ViewArgs) -> Result<i32> {
             if count.is_some_and(|count| printed >= count) {
                 break;
             }
-            if args.alerts.exit_on_alert && alert_fired {
+            if alert_exit_code(args.alerts.exit_on_alert, alert_fired) != 0 {
                 break;
             }
         }
@@ -80,15 +128,11 @@ pub fn run(args: &ViewArgs) -> Result<i32> {
     match result {
         Ok(()) => {}
         // `macgpu --watch | head` closes the pipe: a normal way to stop.
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) if is_broken_pipe(&error) => {}
         Err(error) => return Err(error).context("failed to write output"),
     }
 
-    Ok(if args.alerts.exit_on_alert && alert_fired {
-        ALERT_EXIT_CODE
-    } else {
-        0
-    })
+    Ok(alert_exit_code(args.alerts.exit_on_alert, alert_fired))
 }
 
 /// Renders the header and table for one report.
@@ -228,50 +272,164 @@ pub fn header_lines(report: &Report) -> Vec<String> {
     lines
 }
 
-fn render_rows(rows: &[Row], options: &TableOptions, report: &Report) -> String {
-    let mut out = String::new();
-    let name_width = if options.verbose { 80 } else { 32 };
-    let show_device = rows.iter().any(|row| row.device_pct.is_some());
-    let show_power = rows.iter().any(|row| row.power_w.is_some());
-    let show_memory = rows.iter().any(|row| row.memory_bytes.is_some());
-    let power_label = if options.group == Group::App {
-        "POWER"
-    } else {
-        "~POWER"
-    };
+/// Which columns this batch of rows needs, and how wide the name column is.
+struct Layout {
+    name_width: usize,
+    show_device: bool,
+    show_power: bool,
+    show_memory: bool,
+    children_label: &'static str,
+}
+
+fn layout(rows: &[Row], options: &TableOptions) -> Layout {
     let children_label = match options.group {
         Group::App => "PROCS",
         Group::Process | Group::Client => "QUEUES",
         Group::Queue => "",
     };
+    Layout {
+        name_width: if options.verbose { 80 } else { 32 },
+        show_device: rows.iter().any(|row| row.device_pct.is_some()),
+        show_power: rows.iter().any(|row| row.power_w.is_some()),
+        show_memory: rows.iter().any(|row| row.memory_bytes.is_some()),
+        children_label,
+    }
+}
 
+fn header_line(options: &TableOptions, layout: &Layout) -> String {
+    let power_label = if options.group == Group::App {
+        "POWER"
+    } else {
+        "~POWER"
+    };
     let mut header = format!(
-        "{:>7}  {:<name_width$} {:>9} {:>6}",
+        "{:>7}  {:<width$} {:>9} {:>6}",
         "PID",
         options.group.label().to_uppercase(),
         "GPU ms/s",
-        "SHARE"
+        "SHARE",
+        width = layout.name_width
     );
-    if show_device {
+    if layout.show_device {
         let _ = write!(header, " {:>6}", "DEV%");
     }
-    if show_power {
+    if layout.show_power {
         let _ = write!(header, " {power_label:>8}");
     }
-    if show_memory {
+    if layout.show_memory {
         let _ = write!(header, " {:>9}", "GPU MEM");
     }
     if options.group == Group::App {
         let _ = write!(header, " {:>8}", "EXITED");
     }
-    if !children_label.is_empty() {
-        let _ = write!(header, " {children_label:>6}");
+    if !layout.children_label.is_empty() {
+        let _ = write!(header, " {:>6}", layout.children_label);
     }
     let _ = write!(header, " {:>6}", "LAST");
     if options.all {
         let _ = write!(header, " {:>9}", "LIFETIME");
     }
-    let _ = writeln!(out, "{header}");
+    header
+}
+
+fn row_line(row: &Row, options: &TableOptions, layout: &Layout) -> String {
+    let name = if options.verbose {
+        row.detail.as_deref().unwrap_or(&row.name)
+    } else {
+        &row.name
+    };
+    let pid = row
+        .pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "-".into());
+    let mut line = format!(
+        "{:>7}  {:<width$} {:>9.1} {:>6}",
+        pid,
+        format::truncate(name, layout.name_width),
+        row.busy_ms_per_s,
+        row.share()
+            .map(|share| format!("{share:.1}%"))
+            .unwrap_or_else(|| "-".into()),
+        width = layout.name_width
+    );
+    if layout.show_device {
+        let _ = write!(
+            line,
+            " {:>6}",
+            row.device_pct
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "-".into())
+        );
+    }
+    if layout.show_power {
+        let _ = write!(
+            line,
+            " {:>8}",
+            row.power_w.map(format::watts).unwrap_or_else(|| "-".into())
+        );
+    }
+    if layout.show_memory {
+        let _ = write!(
+            line,
+            " {:>9}",
+            row.memory_bytes
+                .map(format::bytes)
+                .unwrap_or_else(|| "-".into())
+        );
+    }
+    if options.group == Group::App {
+        let _ = write!(
+            line,
+            " {:>8}",
+            row.unattributed_ms_per_s
+                .filter(|value| *value >= 0.05)
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "-".into())
+        );
+    }
+    if !layout.children_label.is_empty() {
+        if row.key == RowKey::Unattributed {
+            let _ = write!(line, " {:>6}", "-");
+        } else {
+            let _ = write!(line, " {:>6}", row.children);
+        }
+    }
+    let _ = write!(
+        line,
+        " {:>6}",
+        row.last_submit_age_ms
+            .map(format::age_ms)
+            .unwrap_or_else(|| "-".into())
+    );
+    if options.all {
+        let _ = write!(
+            line,
+            " {:>9}",
+            format::seconds(row.lifetime_gpu_ns as f64 / 1e9)
+        );
+    }
+    line
+}
+
+fn memory_note(rows: &[Row], options: &TableOptions, report: &Report) -> String {
+    if options.group == Group::Process
+        && rows.iter().any(|row| row.memory_bytes.is_none())
+        && rows.iter().any(|row| row.memory_bytes.is_some())
+        && report
+            .processes
+            .iter()
+            .any(|process| process.graphics_memory_bytes.is_none())
+    {
+        "\nGPU MEM is - for other users' processes; run as root to see them.".into()
+    } else {
+        String::new()
+    }
+}
+
+fn render_rows(rows: &[Row], options: &TableOptions, report: &Report) -> String {
+    let layout = layout(rows, options);
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", header_line(options, &layout));
 
     if rows.is_empty() {
         let what = if options.filter.is_empty() {
@@ -284,98 +442,9 @@ fn render_rows(rows: &[Row], options: &TableOptions, report: &Report) -> String 
     }
 
     for row in rows {
-        let name = if options.verbose {
-            row.detail.as_deref().unwrap_or(&row.name)
-        } else {
-            &row.name
-        };
-        let pid = row
-            .pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "-".into());
-        let mut line = format!(
-            "{:>7}  {:<name_width$} {:>9.1} {:>6}",
-            pid,
-            format::truncate(name, name_width),
-            row.busy_ms_per_s,
-            row.share()
-                .map(|share| format!("{share:.1}%"))
-                .unwrap_or_else(|| "-".into())
-        );
-        if show_device {
-            let _ = write!(
-                line,
-                " {:>6}",
-                row.device_pct
-                    .map(|value| format!("{value:.1}"))
-                    .unwrap_or_else(|| "-".into())
-            );
-        }
-        if show_power {
-            let _ = write!(
-                line,
-                " {:>8}",
-                row.power_w.map(format::watts).unwrap_or_else(|| "-".into())
-            );
-        }
-        if show_memory {
-            let _ = write!(
-                line,
-                " {:>9}",
-                row.memory_bytes
-                    .map(format::bytes)
-                    .unwrap_or_else(|| "-".into())
-            );
-        }
-        if options.group == Group::App {
-            let _ = write!(
-                line,
-                " {:>8}",
-                row.unattributed_ms_per_s
-                    .filter(|value| *value >= 0.05)
-                    .map(|value| format!("{value:.1}"))
-                    .unwrap_or_else(|| "-".into())
-            );
-        }
-        if !children_label.is_empty() {
-            if row.key == RowKey::Unattributed {
-                let _ = write!(line, " {:>6}", "-");
-            } else {
-                let _ = write!(line, " {:>6}", row.children);
-            }
-        }
-        let _ = write!(
-            line,
-            " {:>6}",
-            row.last_submit_age_ms
-                .map(format::age_ms)
-                .unwrap_or_else(|| "-".into())
-        );
-        if options.all {
-            let _ = write!(
-                line,
-                " {:>9}",
-                format::seconds(row.lifetime_gpu_ns as f64 / 1e9)
-            );
-        }
-        let _ = writeln!(out, "{line}");
+        let _ = writeln!(out, "{}", row_line(row, options, &layout));
     }
-
-    if options.group == Group::Process
-        && rows.iter().any(|row| row.memory_bytes.is_none())
-        && show_memory
-    {
-        let other_users = report
-            .processes
-            .iter()
-            .any(|process| process.graphics_memory_bytes.is_none());
-        if other_users {
-            let _ = writeln!(
-                out,
-                "\nGPU MEM is - for other users' processes; run as root to see them."
-            );
-        }
-    }
+    out.push_str(&memory_note(rows, options, report));
     out
 }
 

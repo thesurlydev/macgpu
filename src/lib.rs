@@ -3,8 +3,9 @@
 //!
 //! This crate holds the front ends: the CLI, table, TUI, log, record and
 //! replay, Prometheus server, and the `run` and `doctor` commands. Sampling
-//! and analysis live in `macgpu-core` and the report schema in
-//! `macgpu-model`; both are re-exported here under their old paths.
+//! and analysis live in `macgpu-core` and the report schema in `macgpu-model`;
+//! their public APIs are re-exported below as `engine`, `snapshot`, `sys`,
+//! `analyze`, and `model`.
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("macgpu supports macOS only");

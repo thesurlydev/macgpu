@@ -4,8 +4,8 @@ Ready-made experiments for running [h1](https://github.com/thesurlydev/h1)
 against a local model server and measuring every run with macgpu. Each
 experiment compares a few variants of h1's setup on small coding tasks and
 reports pass rate, tokens, prefill and decode speed, and the GPU energy the
-model server spent. The background is in
-[docs/h1-local-models.md](../../docs/h1-local-models.md).
+model server spent. h1 itself does almost no GPU work, so the lab measures
+the model server's app row, not h1.
 
 ## Quick start
 

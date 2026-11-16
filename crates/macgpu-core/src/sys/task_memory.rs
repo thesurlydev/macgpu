@@ -85,7 +85,7 @@ impl MemoryReader {
     }
 
     /// Reads graphics memory for each of `pids`.
-    pub fn read(&mut self, pids: &[i32]) -> MemoryTable {
+    pub fn read(&self, pids: &[i32]) -> MemoryTable {
         MemoryTable {
             readings: pids.iter().map(|pid| (*pid, read_pid(*pid))).collect(),
         }
@@ -97,6 +97,7 @@ struct NamePort(mach_port_name_t);
 
 impl Drop for NamePort {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a send right owned by this struct, deallocated once here.
         unsafe { mach2::mach_port::mach_port_deallocate(mach_task_self(), self.0) };
     }
 }
@@ -113,9 +114,11 @@ fn read_pid(pid: i32) -> GraphicsMemory {
         return GraphicsMemory::Unavailable;
     }
     let mut name: task_name_t = MACH_PORT_NULL;
+    // SAFETY: `name` is a valid out-parameter for the returned task name right.
     let result = unsafe { task_name_for_pid(mach_task_self(), pid, &mut name) };
     if result != KERN_SUCCESS || name == MACH_PORT_NULL {
         // The process may also have exited; tell the two apart.
+        // SAFETY: `kill` takes its pid and signal by value and reads no caller-owned memory.
         let alive = unsafe { libc::kill(pid, 0) } == 0
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         return if alive {
@@ -128,6 +131,7 @@ fn read_pid(pid: i32) -> GraphicsMemory {
 
     let mut info = task_vm_info::default();
     let mut count = (size_of::<task_vm_info>() / size_of::<u32>()) as mach_msg_type_number_t;
+    // SAFETY: `info` is writable for `count` u32 words and `port.0` is an owned task name right.
     let result = unsafe {
         mach2::task::task_info(
             port.0,
@@ -164,10 +168,12 @@ mod tests {
     /// not counting the one this call takes.
     fn name_port_refs(pid: i32) -> u32 {
         let mut name: task_name_t = MACH_PORT_NULL;
+        // SAFETY: `name` is a valid out-parameter for the returned task name right.
         let result = unsafe { task_name_for_pid(mach_task_self(), pid, &mut name) };
         assert_eq!(result, KERN_SUCCESS);
         let port = NamePort(name);
         let mut refs = 0;
+        // SAFETY: `refs` is a valid out-parameter and `port.0` is an owned send right.
         let result = unsafe {
             mach_port_get_refs(
                 mach_task_self(),
@@ -184,7 +190,7 @@ mod tests {
     fn reads_own_graphics_memory_without_leaking_ports() {
         let own = std::process::id() as i32;
         let before = name_port_refs(own);
-        let mut reader = MemoryReader::new();
+        let reader = MemoryReader::new();
         for _ in 0..200 {
             let table = reader.read(&[own]);
             assert!(matches!(table.get(own), Some(GraphicsMemory::Bytes { .. })));

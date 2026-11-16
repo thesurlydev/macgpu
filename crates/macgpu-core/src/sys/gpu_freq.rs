@@ -8,15 +8,9 @@
 //! differ only in voltage, so the first copy is used. The `pmgr` node's
 //! `voltage-states9` holds the same table on M1 to M5 and is the fallback.
 //!
-//! On M3 and M4 the table is not sorted by frequency. It is sorted by voltage,
-//! and most voltage steps carry two clocks, for example on the M4 Max:
-//! `P9` 1182 MHz and `P10` 1312 MHz at 855 mV, then `P11` 1242 MHz and `P12`
-//! 1380 MHz at 895 mV. This is the hardware table, not a decoding error: under
-//! a fixed-work ALU-bound Metal kernel, the time per kernel in windows spent
-//! almost entirely in one state matched the table within 2% for P1, P2, P3, P4,
-//! P6, P8, P10, P14 and P15 (338 to 1578 MHz). The governor never selected the
-//! lower clock of a voltage pair (P5, P7, P9, P11, P13) in those tests, so those
-//! entries are taken from the table unverified.
+//! The table is sorted by voltage, not frequency, and a voltage step can carry
+//! two clocks: a lower and a higher entry at the same voltage. Both are kept in
+//! IOReport state order so `Pn` maps to the right table entry.
 
 use super::iokit::{self, IoObject};
 
@@ -66,7 +60,7 @@ fn read_gpu_node() -> Option<FrequencyTable> {
     })
 }
 
-/// `voltage-states9` on the power manager node (M1 to M5), as macmon reads it.
+/// `voltage-states9` on the power manager node, parsed as little-endian pairs.
 fn read_pmgr() -> Option<FrequencyTable> {
     let pmgr = iokit::entry_from_path("IODeviceTree:/arm-io/pmgr")?;
     let data = pmgr.property("voltage-states9")?;
@@ -77,10 +71,13 @@ fn read_pmgr() -> Option<FrequencyTable> {
     })
 }
 
+fn u32_le(bytes: &[u8]) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
+}
+
 fn u32_property(entry: &IoObject, key: &str) -> Option<usize> {
     let value = entry.property(key)?;
-    let bytes: [u8; 4] = value.as_data()?.get(..4)?.try_into().ok()?;
-    usize::try_from(u32::from_le_bytes(bytes)).ok()
+    usize::try_from(u32_le(value.as_data()?)?).ok()
 }
 
 /// Parses (Hz, mV) pairs into MHz for P1..Pn, dropping the `OFF` entry.
@@ -95,13 +92,8 @@ pub fn parse_table(data: &[u8], count: Option<usize>, tables: Option<usize>) -> 
         .as_chunks::<8>()
         .0
         .iter()
-        .map(|chunk| {
-            (
-                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-                u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
-            )
-        })
-        .collect();
+        .map(|chunk| Some((u32_le(&chunk[..4])?, u32_le(&chunk[4..])?)))
+        .collect::<Option<Vec<_>>>()?;
     let tables = tables.unwrap_or(1).max(1);
     let count = count.unwrap_or(pairs.len() / tables);
     if count < 2 || pairs.len() < count * tables {
@@ -133,8 +125,8 @@ pub fn parse_table(data: &[u8], count: Option<usize>, tables: Option<usize>) -> 
 mod tests {
     use super::*;
 
-    /// The first two copies of the M4 Max `perf-states` table, frequencies in MHz.
-    const M4_MAX_MHZ: [u32; 16] = [
+    /// Two copies of a `perf-states` table with out-of-order clocks, in MHz.
+    const SAMPLE_MHZ: [u32; 16] = [
         0, 338, 618, 796, 924, 952, 1056, 1062, 1182, 1182, 1312, 1242, 1380, 1326, 1470, 1578,
     ];
 
@@ -151,7 +143,7 @@ mod tests {
 
     #[test]
     fn parses_repeated_tables_without_sorting() {
-        let data = encode(&[(&M4_MAX_MHZ, 600), (&M4_MAX_MHZ, 610)]);
+        let data = encode(&[(&SAMPLE_MHZ, 600), (&SAMPLE_MHZ, 610)]);
         let mhz = parse_table(&data, Some(16), Some(2)).expect("table");
         assert_eq!(mhz.len(), 15);
         assert_eq!(mhz[0], 338.0);
@@ -170,7 +162,7 @@ mod tests {
 
     #[test]
     fn whole_property_is_one_table_without_counts() {
-        let data = encode(&[(&M4_MAX_MHZ, 600)]);
+        let data = encode(&[(&SAMPLE_MHZ, 600)]);
         assert_eq!(
             parse_table(&data, None, None).map(|mhz| mhz.len()),
             Some(15)
@@ -179,9 +171,9 @@ mod tests {
 
     #[test]
     fn rejects_inconsistent_tables() {
-        let mut other = M4_MAX_MHZ;
+        let mut other = SAMPLE_MHZ;
         other[3] = 800;
-        let data = encode(&[(&M4_MAX_MHZ, 600), (&other, 600)]);
+        let data = encode(&[(&SAMPLE_MHZ, 600), (&other, 600)]);
         assert_eq!(parse_table(&data, Some(16), Some(2)), None);
 
         let no_off = [338, 618, 796];
@@ -194,12 +186,12 @@ mod tests {
         );
 
         assert_eq!(parse_table(&[1, 2, 3], None, None), None);
-        let data = encode(&[(&M4_MAX_MHZ, 600)]);
+        let data = encode(&[(&SAMPLE_MHZ, 600)]);
         assert_eq!(parse_table(&data, Some(16), Some(2)), None);
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs Apple Silicon hardware with a device-tree GPU node"]
     fn reads_live_table() {
         let table = read().expect("GPU frequency table");
         assert!(table.mhz.len() >= 2);

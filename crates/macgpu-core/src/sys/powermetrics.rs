@@ -47,18 +47,22 @@ pub fn sudo_available() -> bool {
         .unwrap_or(false)
 }
 
-/// A running one-sample `sudo -n powermetrics` over `interval`.
-pub struct Sampling(Child);
+/// A running one-sample `sudo -n /usr/bin/powermetrics` over `interval`.
+pub struct Sampling {
+    child: Option<Child>,
+}
 
 /// Starts one powermetrics GPU sample covering the next `interval`. Use
 /// [`Sampling::finish`] to collect it, so the caller can take its own samples
 /// over the same window meanwhile.
 pub fn start(interval: Duration) -> Result<Sampling> {
+    // A zero or very short interval samples no useful GPU work; 100 ms is the
+    // smallest window that still gives powermetrics time to collect counters.
     let millis = interval.as_millis().clamp(100, u32::MAX as u128) as u32;
     let child = Command::new("sudo")
         .args([
             "-n",
-            "powermetrics",
+            "/usr/bin/powermetrics",
             "-s",
             "gpu_power",
             "-i",
@@ -71,14 +75,29 @@ pub fn start(interval: Duration) -> Result<Sampling> {
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to run powermetrics")?;
-    Ok(Sampling(child))
+    Ok(Sampling { child: Some(child) })
+}
+
+impl Drop for Sampling {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // SIGTERM, not `kill()`: `sudo` relays it to the root-owned
+            // powermetrics, whereas SIGKILL would end only `sudo`.
+            // SAFETY: `kill` only sends a signal; the pid is a child we have not yet reaped.
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            let _ = child.wait();
+        }
+    }
 }
 
 impl Sampling {
     /// Waits for the sample and parses it.
-    pub fn finish(self) -> Result<PowerStats> {
+    pub fn finish(mut self) -> Result<PowerStats> {
+        // Taking the child leaves nothing for `Drop` to kill or reap.
         let output = self
-            .0
+            .child
+            .take()
+            .context("powermetrics sample already finished")?
             .wait_with_output()
             .context("failed to run powermetrics")?;
         let text = String::from_utf8_lossy(&output.stdout);

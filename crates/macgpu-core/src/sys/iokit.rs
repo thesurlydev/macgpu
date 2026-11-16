@@ -1,9 +1,8 @@
 //! IOKit FFI and the GPU registry reader.
 //!
-//! Replaces `ioreg -r -c IOAccelerator -l -w0`: the reader walks each
-//! `IOAccelerator` service's children in-process and reads only the properties
-//! macgpu needs. On an M4 Max this costs about 0.5 ms per sample, against about
-//! 16 ms for the `ioreg` subprocess.
+//! The reader walks each `IOAccelerator` service's children in-process and
+//! reads the properties macgpu needs. Static properties are cached per
+//! accelerator; performance counters and client queues are read every sample.
 
 use super::cf::{self, Owned, Value};
 use anyhow::{Result, bail};
@@ -13,23 +12,24 @@ use core_foundation_sys::dictionary::{CFDictionaryRef, CFMutableDictionaryRef};
 use core_foundation_sys::string::CFStringRef;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::sync::Arc;
+
+pub use mach2::kern_return::{KERN_SUCCESS, kern_return_t};
+pub use mach2::port::mach_port_t;
 
 #[allow(non_camel_case_types)]
-pub type io_object_t = u32;
+/// An IOKit object handle, represented by the same integer type as a Mach port.
+pub type io_object_t = mach_port_t;
 #[allow(non_camel_case_types)]
-pub type kern_return_t = i32;
-#[allow(non_camel_case_types)]
-pub type mach_port_t = u32;
-
-pub const KERN_SUCCESS: kern_return_t = 0;
+/// A user-client connection returned by `IOServiceOpen`.
+pub type io_connect_t = mach_port_t;
 /// `kIOMainPortDefault` is `MACH_PORT_NULL`.
-pub const MAIN_PORT_DEFAULT: mach_port_t = 0;
+pub const MAIN_PORT_DEFAULT: mach_port_t = mach2::port::MACH_PORT_NULL;
 const SERVICE_PLANE: &CStr = c"IOService";
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     pub fn IOServiceMatching(name: *const c_char) -> CFMutableDictionaryRef;
-    pub fn IOServiceNameMatching(name: *const c_char) -> CFMutableDictionaryRef;
     pub fn IOServiceGetMatchingServices(
         main_port: mach_port_t,
         matching: CFDictionaryRef,
@@ -54,24 +54,17 @@ unsafe extern "C" {
         allocator: CFAllocatorRef,
         options: u32,
     ) -> CFTypeRef;
-    pub fn IORegistryEntryCreateCFProperties(
-        entry: io_object_t,
-        properties: *mut CFMutableDictionaryRef,
-        allocator: CFAllocatorRef,
-        options: u32,
-    ) -> kern_return_t;
     pub fn IORegistryEntryGetRegistryEntryID(entry: io_object_t, id: *mut u64) -> kern_return_t;
-    pub fn IORegistryEntryGetName(entry: io_object_t, name: *mut c_char) -> kern_return_t;
     pub fn IORegistryEntryFromPath(main_port: mach_port_t, path: *const c_char) -> io_object_t;
     pub fn IOServiceOpen(
         service: io_object_t,
         owning_task: mach_port_t,
         kind: u32,
-        connect: *mut io_object_t,
+        connect: *mut io_connect_t,
     ) -> kern_return_t;
-    pub fn IOServiceClose(connect: io_object_t) -> kern_return_t;
+    pub fn IOServiceClose(connect: io_connect_t) -> kern_return_t;
     pub fn IOConnectCallStructMethod(
-        connection: io_object_t,
+        connection: io_connect_t,
         selector: u32,
         input: *const c_void,
         input_size: usize,
@@ -95,18 +88,10 @@ impl IoObject {
 
     pub fn class_name(&self) -> Option<String> {
         let mut buffer = [0 as c_char; 128];
+        // SAFETY: `buffer` has room for the class name, which IOKit NUL-terminates on success.
         let result = unsafe { IOObjectGetClass(self.0, buffer.as_mut_ptr()) };
         (result == KERN_SUCCESS).then(|| {
-            unsafe { CStr::from_ptr(buffer.as_ptr()) }
-                .to_string_lossy()
-                .into_owned()
-        })
-    }
-
-    pub fn name(&self) -> Option<String> {
-        let mut buffer = [0 as c_char; 128];
-        let result = unsafe { IORegistryEntryGetName(self.0, buffer.as_mut_ptr()) };
-        (result == KERN_SUCCESS).then(|| {
+            // SAFETY: the successful call above NUL-terminated `buffer`.
             unsafe { CStr::from_ptr(buffer.as_ptr()) }
                 .to_string_lossy()
                 .into_owned()
@@ -115,6 +100,7 @@ impl IoObject {
 
     pub fn registry_id(&self) -> Option<u64> {
         let mut id = 0u64;
+        // SAFETY: `id` is a valid, writable u64 for the kernel to fill.
         let result = unsafe { IORegistryEntryGetRegistryEntryID(self.0, &mut id) };
         (result == KERN_SUCCESS).then_some(id)
     }
@@ -122,6 +108,7 @@ impl IoObject {
     /// Reads one property. Cheaper than reading the whole property table.
     pub fn property(&self, key: &str) -> Option<Value> {
         let key = cf::cfstring(key);
+        // SAFETY: `key` stays alive for the call; `Owned` releases the +1 reference returned by the create rule.
         unsafe {
             let object = IORegistryEntryCreateCFProperty(
                 self.0,
@@ -133,22 +120,10 @@ impl IoObject {
         }
     }
 
-    /// Reads every property of the entry.
-    pub fn properties(&self) -> Option<Value> {
-        let mut dictionary: CFMutableDictionaryRef = std::ptr::null_mut();
-        unsafe {
-            let result =
-                IORegistryEntryCreateCFProperties(self.0, &mut dictionary, kCFAllocatorDefault, 0);
-            if result != KERN_SUCCESS {
-                return None;
-            }
-            Owned::from_create(dictionary as CFTypeRef).map(|owned| owned.to_value())
-        }
-    }
-
     /// Iterates the entry's children in the IOService plane.
     pub fn children(&self) -> Result<IoIterator> {
         let mut iterator = 0;
+        // SAFETY: `iterator` is a valid out-parameter and `SERVICE_PLANE` is NUL-terminated.
         let result = unsafe {
             IORegistryEntryGetChildIterator(self.0, SERVICE_PLANE.as_ptr(), &mut iterator)
         };
@@ -161,6 +136,7 @@ impl IoObject {
 
 impl Drop for IoObject {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is an owned IOKit handle, released exactly once here.
         unsafe { IOObjectRelease(self.0) };
     }
 }
@@ -178,6 +154,7 @@ impl IoIterator {
 
     /// False when the registry changed during iteration and the walk must restart.
     pub fn is_valid(&self) -> bool {
+        // SAFETY: the iterator handle is owned by `self` and valid while borrowed.
         unsafe { IOIteratorIsValid(self.0.raw()) != 0 }
     }
 }
@@ -186,6 +163,7 @@ impl Iterator for IoIterator {
     type Item = IoObject;
 
     fn next(&mut self) -> Option<IoObject> {
+        // SAFETY: the iterator handle is owned by `self`; the next object is wrapped for release.
         IoObject::new(unsafe { IOIteratorNext(self.0.raw()) })
     }
 }
@@ -194,6 +172,7 @@ impl Iterator for IoIterator {
 pub fn matching_services(class: &str) -> Result<IoIterator> {
     let class = CString::new(class)?;
     let mut iterator = 0;
+    // SAFETY: `class` is NUL-terminated; `IOServiceGetMatchingServices` consumes the matching dictionary and returns an iterator owned by `IoIterator`.
     unsafe {
         let matching = IOServiceMatching(class.as_ptr());
         if matching.is_null() {
@@ -215,6 +194,7 @@ pub fn matching_services(class: &str) -> Result<IoIterator> {
 /// Returns the first service matching an IOKit class name.
 pub fn matching_service(class: &str) -> Option<IoObject> {
     let class = CString::new(class).ok()?;
+    // SAFETY: `class` is NUL-terminated; `IOServiceGetMatchingService` consumes the matching dictionary and its result is wrapped for release.
     unsafe {
         let matching = IOServiceMatching(class.as_ptr());
         if matching.is_null() {
@@ -230,6 +210,7 @@ pub fn matching_service(class: &str) -> Option<IoObject> {
 /// Looks up a registry entry by path, such as `IODeviceTree:/arm-io/sgx`.
 pub fn entry_from_path(path: &str) -> Option<IoObject> {
     let path = CString::new(path).ok()?;
+    // SAFETY: `path` is NUL-terminated and the returned object is wrapped in `IoObject` for release.
     IoObject::new(unsafe { IORegistryEntryFromPath(MAIN_PORT_DEFAULT, path.as_ptr()) })
 }
 
@@ -240,7 +221,6 @@ pub fn entry_from_path(path: &str) -> Option<IoObject> {
 /// Static description of one GPU, read once per accelerator.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GpuStatic {
-    pub class_name: String,
     pub model: Option<String>,
     pub core_count: Option<u32>,
     pub generation: Option<u32>,
@@ -258,19 +238,7 @@ pub struct PerformanceStatistics {
     pub tiler_utilization_pct: Option<u8>,
     pub in_use_system_memory: Option<u64>,
     pub alloc_system_memory: Option<u64>,
-    pub allocated_pb_size: Option<u64>,
-    pub tiled_scene_bytes: Option<u64>,
-    pub split_scene_count: Option<u64>,
     pub recovery_count: Option<u64>,
-    pub last_recovery_time: Option<u64>,
-}
-
-/// The accelerator's `AGCInfo` dictionary.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AgcInfo {
-    pub last_submission_pid: Option<i32>,
-    pub submissions_since_last_check: Option<u64>,
-    pub busy_count: Option<u64>,
 }
 
 /// One `AppUsage` entry. There is one per Metal command queue.
@@ -316,9 +284,8 @@ impl GpuClient {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Accelerator {
     pub registry_id: u64,
-    pub info: GpuStatic,
+    pub info: Arc<GpuStatic>,
     pub performance: PerformanceStatistics,
-    pub agc: AgcInfo,
     pub clients: Vec<GpuClient>,
 }
 
@@ -336,10 +303,10 @@ impl Registry {
     }
 }
 
-/// Reads the GPU registry natively. Caches static per-accelerator information.
+/// Reads the GPU registry, caching static per-accelerator information.
 #[derive(Default)]
 pub struct RegistryReader {
-    statics: HashMap<u64, GpuStatic>,
+    statics: HashMap<u64, Arc<GpuStatic>>,
 }
 
 const MAX_WALK_ATTEMPTS: usize = 3;
@@ -378,24 +345,22 @@ impl RegistryReader {
         let mut registry = Registry::default();
         let services = matching_services("IOAccelerator")?;
         for service in services {
-            let registry_id = service.registry_id().unwrap_or_default();
+            // A failed ID lookup cannot identify a cache entry.
+            let Some(registry_id) = service.registry_id() else {
+                continue;
+            };
             let info = self
                 .statics
                 .entry(registry_id)
-                .or_insert_with(|| read_static(&service))
+                .or_insert_with(|| Arc::new(read_static(&service)))
                 .clone();
             let performance = service
                 .property("PerformanceStatistics")
                 .map(|value| parse_performance_statistics(&value))
                 .unwrap_or_default();
-            let agc = service
-                .property("AGCInfo")
-                .map(|value| parse_agc_info(&value))
-                .unwrap_or_default();
 
             let mut clients = Vec::new();
-            let children = service.children()?;
-            let mut children = children;
+            let mut children = service.children()?;
             for child in children.by_ref() {
                 if child.class_name().as_deref() != Some("AGXDeviceUserClient") {
                     continue;
@@ -412,7 +377,6 @@ impl RegistryReader {
                 registry_id,
                 info,
                 performance,
-                agc,
                 clients,
             });
         }
@@ -430,7 +394,6 @@ fn read_static(service: &IoObject) -> GpuStatic {
             .and_then(|value| u32::try_from(value).ok())
     };
     GpuStatic {
-        class_name: service.class_name().unwrap_or_default(),
         model: service
             .property("model")
             .and_then(|value| value_to_string(&value)),
@@ -536,24 +499,7 @@ pub fn parse_performance_statistics(value: &Value) -> PerformanceStatistics {
         tiler_utilization_pct: u8_stat("Tiler Utilization %"),
         in_use_system_memory: u64_stat("In use system memory"),
         alloc_system_memory: u64_stat("Alloc system memory"),
-        allocated_pb_size: u64_stat("Allocated PB Size"),
-        tiled_scene_bytes: u64_stat("TiledSceneBytes"),
-        split_scene_count: u64_stat("SplitSceneCount"),
         recovery_count: u64_stat("recoveryCount"),
-        last_recovery_time: u64_stat("lastRecoveryTime"),
-    }
-}
-
-pub fn parse_agc_info(value: &Value) -> AgcInfo {
-    AgcInfo {
-        last_submission_pid: value
-            .get("fLastSubmissionPID")
-            .and_then(Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok()),
-        submissions_since_last_check: value
-            .get("fSubmissionsSinceLastCheck")
-            .and_then(Value::as_u64),
-        busy_count: value.get("fBusyCount").and_then(Value::as_u64),
     }
 }
 
@@ -622,11 +568,10 @@ mod tests {
         assert_eq!(stats.in_use_system_memory, Some(3_221_749_760));
         assert_eq!(stats.alloc_system_memory, Some(9_315_614_720));
         assert_eq!(stats.recovery_count, Some(2));
-        assert_eq!(stats.last_recovery_time, None);
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs Apple Silicon hardware with an IOAccelerator service"]
     fn reads_live_registry() {
         let registry = RegistryReader::new().read().expect("read GPU registry");
         assert!(!registry.accelerators.is_empty(), "no IOAccelerator found");

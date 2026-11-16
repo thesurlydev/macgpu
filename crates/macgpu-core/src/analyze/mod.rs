@@ -3,8 +3,8 @@
 //! Everything here is a pure function of the snapshots, so accuracy rules are
 //! unit tested with hand-built inputs. The one exception is app energy over
 //! consecutive windows: coalition energy moves in steps about 0.5 s apart, so
-//! an [`Analyzer`] carries the last second of it from window to window (see
-//! the `apps` module).
+//! an [`Analyzer`] carries just under a second of it from window to window
+//! (see the `apps` module).
 
 mod apps;
 mod device;
@@ -14,7 +14,15 @@ use crate::snapshot::Snapshot;
 use macgpu_model::{Overhead, Report, SCHEMA_VERSION, SourceState, SourceStatus, source};
 
 pub use apps::ENERGY_SPAN_NS;
-pub use processes::align_queues;
+
+/// Conversion factors between nanoseconds and seconds or milliseconds.
+pub(crate) const NS_PER_S: f64 = 1_000_000_000.0;
+pub(crate) const NS_PER_MS: f64 = 1_000_000.0;
+
+/// Saturating sum of GPU or energy counters.
+pub(crate) fn saturating_sum(values: impl Iterator<Item = u64>) -> u64 {
+    values.fold(0u64, u64::saturating_add)
+}
 
 /// A process or queue that submitted work within this many seconds, but not in
 /// the current window, is shown as recent rather than idle.
@@ -28,8 +36,8 @@ pub struct AnalyzeOptions {
 
 /// Analyzes consecutive windows: each call's `previous` is the last call's
 /// `current`. Sampling loops use this rather than [`analyze`], so app energy
-/// in windows shorter than a second is split by the coalition energy of the
-/// last [`ENERGY_SPAN_NS`] rather than lost.
+/// in windows shorter than [`ENERGY_SPAN_NS`] is split by the coalition energy
+/// of that trailing span rather than lost.
 #[derive(Debug, Clone, Default)]
 pub struct Analyzer {
     options: AnalyzeOptions,
@@ -72,7 +80,7 @@ fn build(
         .saturating_duration_since(previous.at)
         .as_nanos()
         .max(1) as u64;
-    let window_seconds = window_ns as f64 / 1e9;
+    let window_seconds = window_ns as f64 / NS_PER_S;
 
     let mut report = Report {
         schema_version: SCHEMA_VERSION,
@@ -114,10 +122,8 @@ fn build(
         .filter(|process| process.gpu_ns > 0)
         .count();
     report.totals.active_apps = report.apps.iter().filter(|app| app.gpu_ns > 0).count();
-    report.totals.attributed_gpu_ns = report
-        .processes
-        .iter()
-        .fold(0u64, |total, process| total.saturating_add(process.gpu_ns));
+    report.totals.attributed_gpu_ns =
+        saturating_sum(report.processes.iter().map(|process| process.gpu_ns));
     report.totals.attributed_ms_per_s = ms_per_s(report.totals.attributed_gpu_ns, window_ns);
 
     if !options.include_idle {
@@ -125,8 +131,8 @@ fn build(
     }
 
     report.overhead = Overhead {
-        sample_wall_ms: current.cost_wall_ns as f64 / 1e6,
-        sample_cpu_ms: current.cost_cpu_ns as f64 / 1e6,
+        sample_wall_ms: current.cost_wall_ns as f64 / NS_PER_MS,
+        sample_cpu_ms: current.cost_cpu_ns as f64 / NS_PER_MS,
         process_cpu_pct: current
             .process_cpu_ns
             .saturating_sub(previous.process_cpu_ns) as f64
@@ -137,12 +143,12 @@ fn build(
     report
 }
 
-/// Nanoseconds of GPU time per wall-clock second, in milliseconds.
+/// GPU time in milliseconds per wall-clock second.
 pub(crate) fn ms_per_s(gpu_ns: u64, window_ns: u64) -> f64 {
     if window_ns == 0 {
         0.0
     } else {
-        gpu_ns as f64 / 1e6 / (window_ns as f64 / 1e9)
+        gpu_ns as f64 / NS_PER_MS / (window_ns as f64 / NS_PER_S)
     }
 }
 

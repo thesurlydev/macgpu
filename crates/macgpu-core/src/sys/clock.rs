@@ -7,6 +7,7 @@ fn timebase() -> (u64, u64) {
     static TIMEBASE: OnceLock<(u64, u64)> = OnceLock::new();
     *TIMEBASE.get_or_init(|| {
         let mut info = mach2::mach_time::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: `info` is a valid out-parameter and the call retains no pointer to it.
         unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
         if info.denom == 0 {
             (1, 1)
@@ -25,6 +26,7 @@ pub fn mach_ticks_to_ns(ticks: u64) -> u64 {
 /// `mach_absolute_time` in nanoseconds. This is the clock `AppUsage`
 /// `lastSubmittedTime` uses: it does not advance during sleep.
 pub fn mach_now_ns() -> u64 {
+    // SAFETY: `mach_absolute_time` takes no arguments and returns the tick count by value.
     mach_ticks_to_ns(unsafe { mach2::mach_time::mach_absolute_time() })
 }
 
@@ -43,6 +45,7 @@ fn clock_ns(clock: libc::clockid_t) -> u64 {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // SAFETY: `spec` is writable for a `timespec` and `clock` is a valid clock id by value.
     if unsafe { libc::clock_gettime(clock, &mut spec) } != 0 {
         return 0;
     }
