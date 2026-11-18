@@ -3,7 +3,7 @@
 macgpu is a Rust workspace (root `macgpu` binary, `macgpu-core` sampler, `macgpu-model` report schema) for Apple Silicon.
 The README documents commands and metrics.
 
-- Default branch `main`; remotes `origin` (GitHub) and `forgejo`. No CI yet.
+- Default branch `main`; remotes `origin` (GitHub) and `forgejo`. Forgejo CI (`.forgejo/workflows/ci.yml`) runs on Linux only: rustfmt for the workspace plus check, clippy and tests for `macgpu-model`. Everything else is verified locally with the gate.
 - It builds and tests on macOS on Apple Silicon only; the sampler reads IOKit, IOReport, SMC and kernel coalitions.
   Only `macgpu-model` is portable.
 - Verify with `mise run gate`: rustfmt, clippy with warnings denied, `check-model-linux` (`cargo check -p macgpu-model

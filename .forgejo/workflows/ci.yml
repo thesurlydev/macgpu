@@ -1,0 +1,41 @@
+# What can run on Forgejo Actions at forgejo.surlylabs.net.
+#
+# The runner fleet is Linux/amd64 Docker only. macgpu reads IOKit, IOReport and the SMC, so only
+# macgpu-model (the report schema) builds on Linux. Formatting covers every crate because rustfmt
+# does not compile. Clippy and the full test suite, including the #[ignore]d GPU tests, stay local:
+# run `mise run gate` (and `mise run test-hardware` after sampling changes) on a Mac.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ forgejo.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  model:
+    name: schema crate (linux-amd64)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      - uses: https://github.com/dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: "1.98"
+          components: rustfmt,clippy
+      - name: Format (whole workspace)
+        run: cargo fmt --all --check
+      - name: Schema crate builds on Linux
+        run: cargo check --locked -p macgpu-model
+      - name: Clippy (schema crate)
+        run: cargo clippy --locked -p macgpu-model --all-targets -- -D warnings
+      - name: Tests (schema crate)
+        run: cargo test --locked -p macgpu-model
