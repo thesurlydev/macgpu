@@ -1,4 +1,4 @@
-# What can run on Forgejo Actions at forgejo.surlylabs.net.
+# What can run on Forgejo Actions.
 #
 # The runner fleet is Linux/amd64 Docker only. macgpu reads IOKit, IOReport and the SMC, so only
 # macgpu-model (the report schema) builds on Linux. Formatting covers every crate because rustfmt

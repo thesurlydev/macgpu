@@ -15,16 +15,16 @@ The README documents commands and metrics.
   `mise run test-hardware` runs everything with `--include-ignored`. Run it when you change sampling or attribution,
   and say so if you did not.
 - `mise run test-unit` is the fast loop; `mise run test-e2e` runs the CLI test binaries without GPU load.
-- `mise run install` copies the release binary to `~/.local/bin/macgpu`. h1's `macgpu_snapshot` tool runs that binary,
-  so an install changes what h1 sees.
+- `mise run install` copies the release binary to `~/.local/bin/macgpu`. Other tools on the machine run that installed
+  binary, so an install changes what they see.
 
 ## Contracts with other repos
 
 - `macgpu-model`'s `Report` is the versioned JSON schema behind `--json`, `record` and `serve`. Add fields as optional;
   removing or renaming one, or changing its meaning, bumps `SCHEMA_VERSION`. On 2026-11-17 a removed working-set
-  field broke h1-viz until it was fixed there (h1-viz commit 3754577), so check h1-viz before removing anything.
-- h1-viz depends on `macgpu-core` and `macgpu-model` by path (`../macgpu/crates/...`), so it builds against whatever
-  is checked out in the primary `~/projects/macgpu`, uncommitted changes included. A broken or half-finished edit
-  there breaks h1-viz.
+  field broke a downstream consumer of the report, so check its consumers before removing anything.
+- Local tools may depend on `macgpu-core` and `macgpu-model` by path (`../macgpu/crates/...`), so they build against
+  whatever is checked out in the primary `~/projects/macgpu`, uncommitted changes included. A broken or half-finished
+  edit there breaks them.
 - The sampler must not open a Metal device: that would make macgpu a GPU client and skew its own numbers. Anything
   that needs `MTLDevice` data (such as the recommended working set) is read by the caller instead.
