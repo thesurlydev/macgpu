@@ -669,7 +669,7 @@ fn broken_down(seconds: i64, local: bool) -> Option<libc::tm> {
     // SAFETY: `tm` is plain data; localtime_r/gmtime_r write into it and
     // report failure through a null return, which the caller handles.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: `time` and `tm` are valid, exclusive references for the call.
+    // SAFETY: `time` is a valid shared reference and `tm` a valid exclusive one for the call.
     // localtime_r and gmtime_r write only into `tm` and return either `&mut tm`
     // or null, so the pointer is only compared against null, never dereferenced.
     let result = unsafe {

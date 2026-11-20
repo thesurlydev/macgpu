@@ -45,7 +45,7 @@ pub fn clock(timestamp_ms: u64) -> String {
     let seconds = (timestamp_ms / 1000) as libc::time_t;
     // SAFETY: `tm` is plain data and `localtime_r` only writes into it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: `seconds` and `tm` are valid, exclusive references for the call,
+    // SAFETY: `seconds` is a valid shared reference and `tm` a valid exclusive one,
     // and the returned pointer is only compared against null.
     if unsafe { libc::localtime_r(&seconds, &mut tm) }.is_null() {
         return "--:--:--".into();
