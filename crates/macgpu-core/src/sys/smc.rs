@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(placeholders.summary(), None);
         assert!(placeholders.not_reporting());
 
-        let mut mixed = placeholders.clone();
+        let mut mixed = placeholders;
         mixed.sensors[0].celsius = 52.0;
         assert_eq!(mixed.summary(), Some((52.0, 52.0, 1)));
         assert!(!mixed.not_reporting());

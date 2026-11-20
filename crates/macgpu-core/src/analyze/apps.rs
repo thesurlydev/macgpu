@@ -1204,7 +1204,7 @@ mod tests {
         );
         let report = with_active(&previous, &current, 100.0);
         assert_eq!(app(&report, 100).unattributed_gpu_ns, Some(0));
-        assert!(!report.unattributed.clone().expect("unattributed").partial);
+        assert!(!report.unattributed.expect("unattributed").partial);
     }
 
     #[test]

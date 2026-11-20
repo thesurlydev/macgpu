@@ -58,7 +58,7 @@ impl Analyzer {
 
     /// Builds the report for the window from `previous` to `current`.
     pub fn analyze(&mut self, previous: &Snapshot, current: &Snapshot) -> Report {
-        build(previous, current, &self.options, &mut self.energy)
+        build(previous, current, self.options, &mut self.energy)
     }
 }
 
@@ -72,7 +72,7 @@ pub fn analyze(previous: &Snapshot, current: &Snapshot, options: &AnalyzeOptions
 fn build(
     previous: &Snapshot,
     current: &Snapshot,
-    options: &AnalyzeOptions,
+    options: AnalyzeOptions,
     energy: &mut apps::EnergyHistory,
 ) -> Report {
     let window_ns = current

@@ -414,7 +414,7 @@ impl CoalitionReader {
                 self.written_slots = buffer.iter().rposition(|value| *value != UNWRITTEN);
             }
             let first_read = !self.tracked.contains_key(&id);
-            let tracked = self.tracked.entry(id).or_insert(Tracked {
+            let tracked = self.tracked.entry(id).or_insert_with(|| Tracked {
                 usage: CoalitionUsage::default(),
                 due: now,
                 tasks: 0,

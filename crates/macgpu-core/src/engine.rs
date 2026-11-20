@@ -56,7 +56,7 @@ impl Engine {
         // no usable engine, so callers treat it as fatal.
         let thread = thread::Builder::new()
             .name("macgpu-sampler".into())
-            .spawn(move || run(config, interval, report_sender, control_receiver))
+            .spawn(move || run(config, interval, &report_sender, &control_receiver))
             .expect("spawn sampler thread");
         Self {
             reports: Some(reports),
@@ -129,8 +129,8 @@ pub fn clamp_interval(interval: Duration) -> Duration {
 fn run(
     config: EngineConfig,
     mut interval: Duration,
-    reports: mpsc::SyncSender<Report>,
-    control: Receiver<Control>,
+    reports: &mpsc::SyncSender<Report>,
+    control: &Receiver<Control>,
 ) {
     let mut analyzer = Analyzer::new(config.options);
     let mut sampler = Sampler::new(config.sources);

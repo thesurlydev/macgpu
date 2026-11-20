@@ -17,10 +17,10 @@ use std::sync::Arc;
 pub use mach2::kern_return::{KERN_SUCCESS, kern_return_t};
 pub use mach2::port::mach_port_t;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "the name mirrors the IOKit C header")]
 /// An IOKit object handle, represented by the same integer type as a Mach port.
 pub type io_object_t = mach_port_t;
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "the name mirrors the IOKit C header")]
 /// A user-client connection returned by `IOServiceOpen`.
 pub type io_connect_t = mach_port_t;
 /// `kIOMainPortDefault` is `MACH_PORT_NULL`.
