@@ -118,7 +118,7 @@ pub fn run(args: &ServeArgs) -> Result<i32> {
         let stop = Arc::clone(&stop);
         thread::Builder::new()
             .name("macgpu-collector".into())
-            .spawn(move || state::collect(Engine::start(config), exporter, &shared, &stop))
+            .spawn(move || state::collect(&Engine::start(config), exporter, &shared, &stop))
             .context("spawn collector thread")?
     };
 

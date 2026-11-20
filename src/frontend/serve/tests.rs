@@ -799,7 +799,7 @@ fn json_failure_and_missing_sample_are_not_empty_successes() {
         stale_after,
     );
     assert_eq!(status, 503);
-    assert_eq!(body.as_str(), "no sample yet\n");
+    assert_eq!(&*body, "no sample yet\n");
     shared.last_sample = Some(Instant::now());
     let (status, _, body) = select_response(
         &shared,
@@ -811,7 +811,7 @@ fn json_failure_and_missing_sample_are_not_empty_successes() {
     assert!(body.contains("JSON encoding failed"));
     let (status, _, body) =
         select_response(&shared, "/healthz", &tiny_http::Method::Get, stale_after);
-    assert_eq!((status, body.as_str()), (200, "ok\n"));
+    assert_eq!((status, &*body), (200, "ok\n"));
     let (status, _, body) =
         select_response(&shared, "/healthz", &tiny_http::Method::Get, Duration::ZERO);
     assert_eq!(status, 503);

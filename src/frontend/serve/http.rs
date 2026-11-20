@@ -95,8 +95,8 @@ pub(super) fn bind_error(address: SocketAddr, error: &io::Error) -> anyhow::Erro
     }
 }
 
-fn plain(status: u16, body: &str) -> (u16, &'static str, Arc<String>) {
-    (status, "text/plain; charset=utf-8", Arc::new(body.into()))
+fn plain(status: u16, body: &str) -> (u16, &'static str, Arc<str>) {
+    (status, "text/plain; charset=utf-8", Arc::from(body))
 }
 
 pub(super) fn select_response(
@@ -104,12 +104,12 @@ pub(super) fn select_response(
     path: &str,
     method: &tiny_http::Method,
     stale_after: Duration,
-) -> (u16, &'static str, Arc<String>) {
+) -> (u16, &'static str, Arc<str>) {
     if !matches!(method, tiny_http::Method::Get | tiny_http::Method::Head) {
         return (
             405,
             "text/plain; charset=utf-8",
-            Arc::new("method not allowed\n".into()),
+            Arc::from("method not allowed\n"),
         );
     }
     match path {
@@ -123,12 +123,12 @@ pub(super) fn select_response(
             None if shared.last_sample.is_some() => (
                 503,
                 "text/plain; charset=utf-8",
-                Arc::new("report unavailable: JSON encoding failed\n".into()),
+                Arc::from("report unavailable: JSON encoding failed\n"),
             ),
             None => (
                 503,
                 "text/plain; charset=utf-8",
-                Arc::new("no sample yet\n".into()),
+                Arc::from("no sample yet\n"),
             ),
         },
         "/healthz" => {
@@ -143,7 +143,7 @@ pub(super) fn select_response(
                     }
                 }
             };
-            (status, "text/plain; charset=utf-8", Arc::new(text))
+            (status, "text/plain; charset=utf-8", Arc::from(text))
         }
         "/" => plain(200, "macgpu exporter\n/metrics\n/report.json\n/healthz\n"),
         _ => plain(404, "not found\n"),
@@ -197,7 +197,7 @@ pub(super) fn respond(request: tiny_http::Request, shared: &RwLock<Shared>, stal
     drop(shared);
     let header = tiny_http::Header::from_bytes("Content-Type", content_type)
         .expect("valid content type header");
-    let response = tiny_http::Response::from_string(body.as_str())
+    let response = tiny_http::Response::from_string(&*body)
         .with_status_code(status)
         .with_header(header);
     // A client that went away is not an error worth reporting.

@@ -7,15 +7,15 @@ use std::time::{Duration, Instant};
 
 /// What HTTP handlers read. Replaced wholesale after each sample.
 pub(super) struct Shared {
-    pub(super) metrics: Arc<String>,
-    pub(super) report_json: Option<Arc<String>>,
+    pub(super) metrics: Arc<str>,
+    pub(super) report_json: Option<Arc<str>>,
     pub(super) last_sample: Option<Instant>,
 }
 
 impl Shared {
     pub(super) fn new(metrics: String) -> Self {
         Self {
-            metrics: Arc::new(metrics),
+            metrics: Arc::from(metrics),
             report_json: None,
             last_sample: None,
         }
@@ -23,7 +23,7 @@ impl Shared {
 }
 
 pub(super) fn collect(
-    engine: Engine,
+    engine: &Engine,
     mut exporter: Exporter,
     shared: &RwLock<Shared>,
     stop: &AtomicBool,
@@ -36,14 +36,14 @@ pub(super) fn collect(
         };
         let metrics = exporter.update(&report);
         let json = match serde_json::to_string(&report) {
-            Ok(json) => Some(Arc::new(json)),
+            Ok(json) => Some(Arc::from(json)),
             Err(error) => {
                 eprintln!("macgpu: cannot encode report as JSON: {error}");
                 None
             }
         };
         let mut shared = shared.write().unwrap_or_else(PoisonError::into_inner);
-        shared.metrics = Arc::new(metrics);
+        shared.metrics = Arc::from(metrics);
         shared.report_json = json;
         shared.last_sample = Some(Instant::now());
     }
