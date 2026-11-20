@@ -204,6 +204,9 @@ fn log_stops_cleanly_on_sigterm() {
         }
         text.push_str(&line);
     }
+    // SAFETY: `kill` takes plain integers and touches no memory; the pid is that
+    // of a child this test spawned and has not yet waited on, so it cannot have
+    // been reused.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let status = wait_timeout(&mut child, Duration::from_secs(5)).expect("log stopped");
     assert_eq!(status.code(), Some(0));
@@ -445,6 +448,9 @@ fn serve_exposes_metrics_report_and_health() {
     assert_eq!(http_get(port, "/nope").0, 404);
 
     // SIGTERM stops it cleanly.
+    // SAFETY: `kill` takes plain integers and touches no memory; the pid is that
+    // of a child this test spawned and has not yet waited on, so it cannot have
+    // been reused.
     unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
     let status = wait_timeout(&mut server.0, Duration::from_secs(5)).expect("stopped");
     assert_eq!(status.code(), Some(0));
@@ -564,6 +570,9 @@ fn run_writes_json_and_forwards_sigterm() {
     // command exists the signal is forwarded rather than fatal. No fixed delay
     // after the poll is needed.
     wait_for_child_named(child.id(), "sleep", Duration::from_secs(30));
+    // SAFETY: `kill` takes plain integers and touches no memory; the pid is that
+    // of a child this test spawned and has not yet waited on, so it cannot have
+    // been reused.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let status = wait_timeout(&mut child, Duration::from_secs(5)).expect("forwarded SIGTERM");
     assert_eq!(status.code(), Some(128 + libc::SIGTERM));
