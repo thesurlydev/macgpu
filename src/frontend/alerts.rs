@@ -511,10 +511,12 @@ impl Rule {
                 let unit = unit.ok_or(
                     "a process or app rule needs a unit: ms/s, %, W, or bytes (for example GiB)",
                 )?;
-                let metric = RowMetric::from_unit(unit).ok_or(format!(
-                    "{} is not a per-row metric; use ms/s, %, W, or bytes",
-                    unit.name()
-                ))?;
+                let metric = RowMetric::from_unit(unit).ok_or_else(|| {
+                    format!(
+                        "{} is not a per-row metric; use ms/s, %, W, or bytes",
+                        unit.name()
+                    )
+                })?;
                 Subject::Rows {
                     group,
                     filter,
@@ -522,10 +524,12 @@ impl Rule {
                 }
             }
             None => {
-                let metric = DeviceMetric::parse(&subject.to_lowercase()).ok_or(format!(
-                    "unknown metric {subject:?}; expected active, normalized, firmware, mhz, \
-                     power, temp, temp_max, memory, busy, limited, or a process: or app: scope"
-                ))?;
+                let metric = DeviceMetric::parse(&subject.to_lowercase()).ok_or_else(|| {
+                    format!(
+                        "unknown metric {subject:?}; expected active, normalized, firmware, mhz, \
+                         power, temp, temp_max, memory, busy, limited, or a process: or app: scope"
+                    )
+                })?;
                 if let Some(unit) = unit
                     && unit != metric.unit()
                 {

@@ -419,8 +419,8 @@ impl App {
 
     // ---- actions ------------------------------------------------------------
 
-    pub(super) fn apply_filter(&mut self, text: String) {
-        self.filter = Filter::parse(&text);
+    pub(super) fn apply_filter(&mut self, text: &str) {
+        self.filter = Filter::parse(text);
         self.filter_text = self.filter.to_string();
         self.rebuild_rows();
         if self.filter.is_empty() {
@@ -568,7 +568,7 @@ impl App {
             RowKey::App { coalition_id } => {
                 let app = report.app(coalition_id)?;
                 let pid = app.responsible_pid?;
-                process_target(pid).or(Some((pid, None, app.name.clone())))
+                process_target(pid).or_else(|| Some((pid, None, app.name.clone())))
             }
             RowKey::Unattributed => None,
         }

@@ -151,7 +151,7 @@ fn exited_process_time_is_kept_by_coalition() {
         ms(exit_gap),
         exit_app
             .unattributed_gpu_ns
-            .map_or("none".into(), |exited| format!("{:.1} ms", ms(exited))),
+            .map_or_else(|| "none".into(), |exited| format!("{:.1} ms", ms(exited))),
         ms(others)
     );
 

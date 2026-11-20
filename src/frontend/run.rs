@@ -639,7 +639,7 @@ mod tests {
         assert!(tree.contains(101, 1));
 
         // Second window: no per-app estimate, so whole-GPU power apportioned.
-        let mut second = ours.clone();
+        let mut second = ours;
         second.est_power_w = None;
         second.gpu_ns = 500_000_000;
         second.device_pct = Some(80.0);

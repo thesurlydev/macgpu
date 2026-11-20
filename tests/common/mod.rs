@@ -5,7 +5,10 @@
 //! `cargo test` runs, and not with a `macgpu doctor --load`. Loads that do not
 //! take the lock can still run, so every assertion allows for other GPU work.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different subset of these helpers"
+)]
 
 use macgpu::frontend::doctor::GpuLoadLock;
 use macgpu::metal_load::{LoadConfig, LoadProcess};

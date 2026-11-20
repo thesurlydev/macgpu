@@ -45,7 +45,7 @@ impl App {
                     previous: self.filter_text.clone(),
                 }
             }
-            KeyCode::Esc if !self.filter.is_empty() => self.apply_filter(String::new()),
+            KeyCode::Esc if !self.filter.is_empty() => self.apply_filter(""),
             KeyCode::Char('s') | KeyCode::Char('.') | KeyCode::Char('>') => {
                 self.set_sort(self.sort.step(true), false)
             }
@@ -141,13 +141,13 @@ impl App {
             KeyCode::Enter => {
                 let text = input.clone();
                 self.overlay = Overlay::None;
-                self.apply_filter(text);
+                self.apply_filter(&text);
                 return;
             }
             KeyCode::Esc => {
                 let text = previous.clone();
                 self.overlay = Overlay::None;
-                self.apply_filter(text);
+                self.apply_filter(&text);
                 return;
             }
             KeyCode::Backspace => {

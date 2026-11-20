@@ -118,8 +118,8 @@ fn temperature_is_reported_under_load() {
         ..LoadConfig::default()
     });
     require(&load, source::TEMPERATURE);
-    let before = idle.device.temperature.clone().expect("idle temperature");
-    let after = load.device.temperature.clone().expect("load temperature");
+    let before = idle.device.temperature.expect("idle temperature");
+    let after = load.device.temperature.expect("load temperature");
     eprintln!(
         "GPU max {:.1} C -> {:.1} C, average {:.1} C -> {:.1} C, {} sensors",
         before.max_c, after.max_c, before.avg_c, after.avg_c, after.sensors
