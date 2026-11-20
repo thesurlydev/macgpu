@@ -18,6 +18,39 @@ objc2-foundation = "0.3"
 objc2-metal = "0.3"
 serde = { version = "1", features = ["derive"] }
 
+# Lint baseline; repo-specific lints below it.
+[workspace.lints.clippy]
+# Left-in debugging and stubs. No repo had any; the lints keep it that way.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# Panics. unwrap() says nothing about why it cannot fail; expect() with the invariant is allowed.
+unwrap_used = "warn"
+
+# Suppressions and unsafe. #[expect] warns once the lint stops firing; #[allow] never does.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "warn"
+mem_forget = "warn"
+
+# Ownership and allocation.
+redundant_clone = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"
+needless_collect = "warn"
+or_fun_call = "warn"
+needless_pass_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+large_types_passed_by_value = "warn"
+large_stack_arrays = "warn"
+rc_buffer = "warn"
+
+# API shape and async.
+ref_option = "warn"
+unnecessary_wraps = "warn"
+unused_async = "warn"
+
 [package]
 name = "macgpu"
 version.workspace = true
@@ -30,6 +63,9 @@ keywords = ["apple-silicon", "gpu", "macos", "monitoring"]
 readme = "README.md"
 rust-version.workspace = true
 publish.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true
