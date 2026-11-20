@@ -531,7 +531,7 @@ fn list_coalitions() -> Result<Vec<ProcInfoCoalInfo>> {
 }
 
 /// The resource coalition `pid` belongs to. Works for every user's processes.
-fn coalition_of_pid(pid: i32) -> Option<u64> {
+pub fn coalition_of_pid(pid: i32) -> Option<u64> {
     let mut info = ProcPidCoalitionInfo::default();
     let size = size_of::<ProcPidCoalitionInfo>() as c_int;
     // SAFETY: `info` is a zeroed, correctly sized buffer for `PROC_PIDCOALITIONINFO` output.
